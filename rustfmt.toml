@@ -1,0 +1,5 @@
+# Ширина по умолчанию, но без дробления коротких литералов и вызовов на отдельные строки:
+# `MemoryStats { used_bytes: Some(50), total_bytes: None }` читается лучше в одну строку,
+# чем в четыре.
+max_width = 100
+use_small_heuristics = "Max"
