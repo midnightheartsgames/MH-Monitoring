@@ -11,3 +11,4 @@
 
 pub mod clock;
 pub mod frames;
+pub mod hardware;

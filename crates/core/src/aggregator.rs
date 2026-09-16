@@ -94,6 +94,7 @@ impl Aggregator {
             gpu: merge_gpu(fast.map(|s| &s.gpu), slow.map(|s| &s.gpu)),
             cpu: merge_cpu(fast.map(|s| &s.cpu), slow.map(|s| &s.cpu)),
             memory: MemoryStats {
+                health: merge_health(fast.map(|s| s.memory.health), slow.map(|s| s.memory.health)),
                 // Объёмы памяти — поле медленного тира; быстрый лишь подстраховывает.
                 used_bytes: pick(
                     slow.and_then(|s| s.memory.used_bytes),
@@ -127,8 +128,17 @@ fn pick<T>(owner: Option<T>, fallback: Option<T>) -> Option<T> {
     owner.or(fallback)
 }
 
+/// Здоровье секции по обоим тирам. Протухший или отсутствующий тир мнения не имеет.
+fn merge_health(
+    fast: Option<crate::telemetry::SectionHealth>,
+    slow: Option<crate::telemetry::SectionHealth>,
+) -> crate::telemetry::SectionHealth {
+    fast.unwrap_or_default().merge(slow.unwrap_or_default())
+}
+
 fn merge_gpu(fast: Option<&GpuStats>, slow: Option<&GpuStats>) -> GpuStats {
     GpuStats {
+        health: merge_health(fast.map(|s| s.health), slow.map(|s| s.health)),
         name: pick(slow.and_then(|s| s.name.clone()), fast.and_then(|s| s.name.clone())),
         load_percent: pick(fast.and_then(|s| s.load_percent), slow.and_then(|s| s.load_percent)),
         temperature_c: pick(slow.and_then(|s| s.temperature_c), fast.and_then(|s| s.temperature_c)),
@@ -155,6 +165,7 @@ fn merge_gpu(fast: Option<&GpuStats>, slow: Option<&GpuStats>) -> GpuStats {
 
 fn merge_cpu(fast: Option<&CpuStats>, slow: Option<&CpuStats>) -> CpuStats {
     CpuStats {
+        health: merge_health(fast.map(|s| s.health), slow.map(|s| s.health)),
         name: pick(slow.and_then(|s| s.name.clone()), fast.and_then(|s| s.name.clone())),
         load_percent: pick(fast.and_then(|s| s.load_percent), slow.and_then(|s| s.load_percent)),
         temperature_c: pick(slow.and_then(|s| s.temperature_c), fast.and_then(|s| s.temperature_c)),
@@ -208,7 +219,11 @@ mod tests {
                 temperature_c: Some(55.0),
                 ..Default::default()
             },
-            memory: MemoryStats { used_bytes: Some(16_000), total_bytes: Some(32_000) },
+            memory: MemoryStats {
+                used_bytes: Some(16_000),
+                total_bytes: Some(32_000),
+                ..Default::default()
+            },
             status: SensorStatus::Available,
         }
     }
@@ -295,6 +310,42 @@ mod tests {
             1_000,
         );
         assert_eq!(aggregator.snapshot(1_000).hardware_status, SensorStatus::Error);
+    }
+
+    // --- здоровье секций ---
+
+    /// Быстрый тир знает только загрузку CPU и молчит о температуре, медленный говорит, что
+    /// температуры нет без PawnIO. Итог — «частично» с причиной, а не «исправно».
+    #[test]
+    fn section_health_merges_across_tiers() {
+        use crate::telemetry::{SectionHealth, SensorReason};
+
+        let mut aggregator = Aggregator::new();
+        let mut fast = load_sample();
+        fast.cpu.health = SectionHealth::available();
+        let mut slow = slow_sample();
+        slow.cpu.health = SectionHealth::partial(SensorReason::PawnIoMissing);
+        aggregator.submit_hardware(SampleTier::Load, fast, 1_000);
+        aggregator.submit_hardware(SampleTier::Slow, slow, 1_000);
+
+        let health = aggregator.snapshot(1_000).cpu.health;
+        assert_eq!(health.status, SensorStatus::Partial);
+        assert_eq!(health.reason, Some(SensorReason::PawnIoMissing));
+    }
+
+    /// Тир, который секцию не опрашивает, её статус не портит.
+    #[test]
+    fn a_tier_that_ignores_a_section_does_not_degrade_it() {
+        use crate::telemetry::SectionHealth;
+
+        let mut aggregator = Aggregator::new();
+        let mut fast = load_sample();
+        fast.memory.health = SectionHealth::available();
+        let slow = slow_sample(); // здоровье памяти не задано — Unknown
+        aggregator.submit_hardware(SampleTier::Load, fast, 1_000);
+        aggregator.submit_hardware(SampleTier::Slow, slow, 1_000);
+
+        assert_eq!(aggregator.snapshot(1_000).memory.health.status, SensorStatus::Available);
     }
 
     // --- FPS ---

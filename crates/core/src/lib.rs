@@ -42,4 +42,6 @@ pub use statistics::FrameStatistics;
 pub use target::{
     ProcessLookup, TargetMode, TargetResolution, TargetSettings, TargetTracker, is_shell_process,
 };
-pub use telemetry::{CpuStats, GpuStats, MemoryStats, SensorStatus, Snapshot};
+pub use telemetry::{
+    CpuStats, GpuStats, MemoryStats, SectionHealth, SensorReason, SensorStatus, Snapshot,
+};

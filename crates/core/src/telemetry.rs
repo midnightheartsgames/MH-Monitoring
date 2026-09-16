@@ -46,8 +46,90 @@ impl SensorStatus {
     }
 }
 
+/// Почему секция показывает не всё.
+///
+/// Коды, а не свободный текст, — по тем же причинам, что и у кадров: одна ситуация обязана
+/// читаться одинаково, и прочерк в HUD без объяснения запрещён планом (PLAN.md §6/P3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorReason {
+    /// `nvml.dll` не найдена — драйвер NVIDIA не установлен.
+    GpuDriverMissing,
+    /// NVML есть, но видеокарты NVIDIA нет. AMD и Intel — задача ADLX и IGCL (решение D3).
+    NoSupportedGpu,
+    /// NVML ответил ошибкой.
+    GpuQueryFailed,
+    /// Для температуры и мощности CPU нужен драйвер PawnIO (решение D4).
+    PawnIoMissing,
+    /// Драйвер есть, но без прав администратора к нему не пускают.
+    NeedsAdmin,
+    /// Этот процессор пока не поддерживается для температуры и мощности.
+    CpuNotSupported,
+    /// Датчик не ответил.
+    SensorReadFailed,
+}
+
+impl SensorReason {
+    pub fn message(self) -> &'static str {
+        match self {
+            SensorReason::GpuDriverMissing => "драйвер NVIDIA не найден",
+            SensorReason::NoSupportedGpu => "видеокарта не поддерживается",
+            SensorReason::GpuQueryFailed => "видеокарта не отвечает",
+            SensorReason::PawnIoMissing => "установите PawnIO для температуры и мощности",
+            SensorReason::NeedsAdmin => "нужны права администратора",
+            SensorReason::CpuNotSupported => "температура этого процессора не поддерживается",
+            SensorReason::SensorReadFailed => "датчик не ответил",
+        }
+    }
+}
+
+impl std::fmt::Display for SensorReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+/// Здоровье одной секции HUD: насколько она заполнена и почему не целиком.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SectionHealth {
+    pub status: SensorStatus,
+    pub reason: Option<SensorReason>,
+}
+
+impl SectionHealth {
+    pub fn available() -> Self {
+        Self { status: SensorStatus::Available, reason: None }
+    }
+
+    pub fn partial(reason: SensorReason) -> Self {
+        Self { status: SensorStatus::Partial, reason: Some(reason) }
+    }
+
+    pub fn unavailable(reason: SensorReason) -> Self {
+        Self { status: SensorStatus::Unavailable, reason: Some(reason) }
+    }
+
+    pub fn error(reason: SensorReason) -> Self {
+        Self { status: SensorStatus::Error, reason: Some(reason) }
+    }
+
+    /// Слияние двух мнений о секции.
+    ///
+    /// `Unknown` здесь значит «нет мнения», а не «плохо»: тир опроса, который секцию вообще не
+    /// читает, не должен тянуть её статус вниз. Из двух настоящих мнений побеждает худшее вместе
+    /// со своей причиной.
+    pub fn merge(self, other: SectionHealth) -> SectionHealth {
+        match (self.status, other.status) {
+            (SensorStatus::Unknown, _) => other,
+            (_, SensorStatus::Unknown) => self,
+            _ if other.status.severity() > self.status.severity() => other,
+            _ => self,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GpuStats {
+    pub health: SectionHealth,
     pub name: Option<String>,
     pub load_percent: Option<f64>,
     pub temperature_c: Option<f64>,
@@ -73,9 +155,10 @@ impl GpuStats {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CpuStats {
+    pub health: SectionHealth,
     pub name: Option<String>,
     pub load_percent: Option<f64>,
-    /// Требует драйвера режима ядра, поэтому в чистом user-mode обычно `None` (PLAN.md §2.10).
+    /// Требует драйвера режима ядра — читается через PawnIO (решение D4, PLAN.md §2.14).
     pub temperature_c: Option<f64>,
     pub clock_mhz: Option<f64>,
     pub power_watts: Option<f64>,
@@ -92,6 +175,7 @@ impl CpuStats {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemoryStats {
+    pub health: SectionHealth,
     pub used_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
 }
@@ -154,16 +238,26 @@ mod tests {
 
     #[test]
     fn memory_load_needs_both_numbers() {
-        assert_eq!(MemoryStats { used_bytes: Some(50), total_bytes: None }.load_percent(), None);
-        assert_eq!(MemoryStats { used_bytes: None, total_bytes: Some(100) }.load_percent(), None);
-        let half = MemoryStats { used_bytes: Some(50), total_bytes: Some(100) };
+        assert_eq!(
+            MemoryStats { used_bytes: Some(50), total_bytes: None, ..Default::default() }
+                .load_percent(),
+            None
+        );
+        assert_eq!(
+            MemoryStats { used_bytes: None, total_bytes: Some(100), ..Default::default() }
+                .load_percent(),
+            None
+        );
+        let half =
+            MemoryStats { used_bytes: Some(50), total_bytes: Some(100), ..Default::default() };
         assert_eq!(half.load_percent(), Some(50.0));
     }
 
     /// Деление на ноль дало бы NaN или inf, а они дальше разъезжаются по всему UI.
     #[test]
     fn a_zero_total_is_not_a_hundred_percent() {
-        let broken = MemoryStats { used_bytes: Some(50), total_bytes: Some(0) };
+        let broken =
+            MemoryStats { used_bytes: Some(50), total_bytes: Some(0), ..Default::default() };
         assert_eq!(broken.load_percent(), None);
     }
 
@@ -173,6 +267,48 @@ mod tests {
         assert!(!named.has_any_value(), "имя — не показание");
         let measured = GpuStats { load_percent: Some(42.0), ..named };
         assert!(measured.has_any_value());
+    }
+
+    // --- здоровье секций ---
+
+    #[test]
+    fn unknown_is_no_opinion_when_merging() {
+        let partial = SectionHealth::partial(SensorReason::PawnIoMissing);
+        assert_eq!(SectionHealth::default().merge(partial), partial);
+        assert_eq!(partial.merge(SectionHealth::default()), partial);
+        assert_eq!(
+            SectionHealth::default().merge(SectionHealth::default()).status,
+            SensorStatus::Unknown
+        );
+    }
+
+    /// Загрузка CPU читается всегда, температура — только с PawnIO. Секция обязана честно сказать
+    /// «частично» и почему, а не выглядеть исправной.
+    #[test]
+    fn the_worse_opinion_wins_together_with_its_reason() {
+        let merged =
+            SectionHealth::available().merge(SectionHealth::partial(SensorReason::NeedsAdmin));
+        assert_eq!(merged.status, SensorStatus::Partial);
+        assert_eq!(merged.reason, Some(SensorReason::NeedsAdmin));
+
+        let worse = SectionHealth::partial(SensorReason::PawnIoMissing)
+            .merge(SectionHealth::error(SensorReason::GpuQueryFailed));
+        assert_eq!(worse.reason, Some(SensorReason::GpuQueryFailed));
+    }
+
+    #[test]
+    fn every_reason_has_a_message() {
+        for reason in [
+            SensorReason::GpuDriverMissing,
+            SensorReason::NoSupportedGpu,
+            SensorReason::GpuQueryFailed,
+            SensorReason::PawnIoMissing,
+            SensorReason::NeedsAdmin,
+            SensorReason::CpuNotSupported,
+            SensorReason::SensorReadFailed,
+        ] {
+            assert!(!reason.message().is_empty(), "{reason:?}");
+        }
     }
 
     #[test]
