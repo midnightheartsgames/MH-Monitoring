@@ -131,6 +131,7 @@ const PROCESS_ID_NAMES: &[&str] = &["processid", "pid"];
 const APPLICATION_NAMES: &[&str] = &["application", "processname", "process"];
 const SWAP_CHAIN_NAMES: &[&str] = &["swapchainaddress", "swapchain"];
 const PRESENT_MODE_NAMES: &[&str] = &["presentmode"];
+const PRESENT_RUNTIME_NAMES: &[&str] = &["presentruntime", "runtime"];
 const SOURCE_TIME_NAMES: &[&str] = &["cpustarttime", "timeinseconds", "timeinms"];
 
 /// Колонки одного поколения CSV, разобранные из заголовка **один раз**.
@@ -146,6 +147,7 @@ pub struct Schema {
     pub swap_chain_column: Option<usize>,
     pub source_time_column: Option<usize>,
     pub present_mode_column: Option<usize>,
+    pub present_runtime_column: Option<usize>,
     pub column_count: usize,
 }
 
@@ -187,6 +189,7 @@ impl Schema {
             swap_chain_column: index_of(SWAP_CHAIN_NAMES),
             source_time_column: index_of(SOURCE_TIME_NAMES),
             present_mode_column: index_of(PRESENT_MODE_NAMES),
+            present_runtime_column: index_of(PRESENT_RUNTIME_NAMES),
             column_count: names.len(),
         })
     }
@@ -235,6 +238,19 @@ pub struct ParsedFrame<'a> {
     pub swap_chain: Option<&'a str>,
     /// «Composed: Flip», «Hardware: Independent Flip» и т. п.
     pub present_mode: Option<&'a str>,
+    /// «DXGI», «D3D9» или «Other» — последнее у OpenGL и Vulkan.
+    pub present_runtime: Option<&'a str>,
+}
+
+/// Видит ли этот рантайм собственный ETW-потребитель — то есть есть ли куда откатываться.
+///
+/// OpenGL (у PresentMon — «Other») собственный потребитель не видит вовсе (PLAN.md §2.4).
+/// Ion Fury в окне выводит через GDI-копию, и откат по режиму оставил его совсем без FPS, хотя
+/// PresentMon его кадры считает.
+pub fn fallback_sees_runtime(runtime: &str) -> bool {
+    // OpenGL и прочее («Other») собственный потребитель видит через событие вывода ядра:
+    // Ion Fury в окне так виден полностью (PLAN.md §2.16).
+    ["dxgi", "d3d9", "other"].iter().any(|known| runtime.eq_ignore_ascii_case(known))
 }
 
 /// Режимы, в которых PresentMon 2.5.1 теряет кадры.
@@ -260,6 +276,7 @@ pub fn parse_row<'a>(
     let mut source_time: Option<f64> = None;
     let mut swap_chain: Option<&str> = None;
     let mut present_mode: Option<&str> = None;
+    let mut present_runtime: Option<&str> = None;
 
     for (column, cell) in cells(line).enumerate() {
         if column == schema.frame_time_column {
@@ -284,13 +301,22 @@ pub fn parse_row<'a>(
             swap_chain = Some(cell);
         } else if Some(column) == schema.present_mode_column {
             present_mode = Some(cell);
+        } else if Some(column) == schema.present_runtime_column {
+            present_runtime = Some(cell);
         } else if Some(column) == schema.source_time_column {
             source_time = cell.parse().ok();
         }
     }
 
     let frame_time_ms = frame_time_ms.ok_or(RowRejection::TooShort)?;
-    Ok(ParsedFrame { frame_time_ms, process_id, source_time, swap_chain, present_mode })
+    Ok(ParsedFrame {
+        frame_time_ms,
+        process_id,
+        source_time,
+        swap_chain,
+        present_mode,
+        present_runtime,
+    })
 }
 
 #[cfg(test)]
@@ -470,7 +496,16 @@ AnimationTime,MsFlipDelay,MsAllInputToPhotonLatency,MsClickToPhotonLatency";
         let schema = Schema::parse(HEADER_2_5_1, false).unwrap();
         let frame = parse_row(&schema, ROW_2_5_1, None).unwrap();
         assert_eq!(frame.present_mode, Some("Composed: Flip"));
+        assert_eq!(frame.present_runtime, Some("DXGI"));
         assert!(!is_untracked_present_mode("Composed: Flip"));
+    }
+
+    #[test]
+    fn only_dxgi_and_d3d9_have_a_fallback() {
+        assert!(fallback_sees_runtime("DXGI"));
+        assert!(fallback_sees_runtime("D3D9"));
+        assert!(fallback_sees_runtime("Other"));
+        assert!(!fallback_sees_runtime(""));
     }
 
     #[test]

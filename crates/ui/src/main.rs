@@ -16,7 +16,11 @@ mod app;
 #[cfg(windows)]
 mod controls;
 #[cfg(windows)]
+mod diag;
+#[cfg(windows)]
 mod hud;
+#[cfg(windows)]
+mod settings_window;
 #[cfg(windows)]
 mod theme;
 

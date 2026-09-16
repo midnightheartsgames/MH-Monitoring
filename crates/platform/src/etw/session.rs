@@ -7,7 +7,8 @@ use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, WIN32_ERROR,
 };
 use windows_sys::Win32::System::Diagnostics::Etw::{
-    CONTROLTRACE_HANDLE, ControlTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+    CONTROLTRACE_HANDLE, ControlTraceW, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
+    EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_FILTER_DESCRIPTOR, EVENT_FILTER_TYPE_EVENT_ID,
     EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, StartTraceW,
     WNODE_FLAG_TRACED_GUID,
 };
@@ -15,6 +16,18 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
 use crate::sys::{PropsBuffer, Win32Error, wide};
 
 use super::hygiene::stop_by_name;
+
+/// Полезная нагрузка `EVENT_FILTER_EVENT_ID`: `FilterIn`, резерв, число номеров, номера.
+fn encode_event_id_filter(event_ids: &[u16]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4 + event_ids.len() * 2);
+    payload.push(1); // FilterIn: пропускать перечисленные
+    payload.push(0);
+    payload.extend_from_slice(&(event_ids.len() as u16).to_le_bytes());
+    for id in event_ids {
+        payload.extend_from_slice(&id.to_le_bytes());
+    }
+    payload
+}
 
 /// Описание провайдера, который надо включить в сессию.
 ///
@@ -199,6 +212,43 @@ impl Session {
         if status == ERROR_SUCCESS { Ok(()) } else { Err(status) }
     }
 
+    /// Включает провайдера, пропуская только события с перечисленными номерами.
+    ///
+    /// Фильтр работает на стороне ETW, до буферов сессии: у `DxgKrnl` без него даже на скромных
+    /// настройках идут десятки тысяч событий в секунду, а нужно одно на кадр.
+    pub fn enable_provider_filtered(
+        &self,
+        provider: &Provider,
+        event_ids: &[u16],
+    ) -> Result<(), WIN32_ERROR> {
+        let payload = encode_event_id_filter(event_ids);
+        let mut descriptor = EVENT_FILTER_DESCRIPTOR {
+            Ptr: payload.as_ptr() as u64,
+            Size: payload.len() as u32,
+            Type: EVENT_FILTER_TYPE_EVENT_ID,
+        };
+        let parameters = ENABLE_TRACE_PARAMETERS {
+            Version: ENABLE_TRACE_PARAMETERS_VERSION_2,
+            EnableFilterDesc: &mut descriptor,
+            FilterDescCount: 1,
+            ..Default::default()
+        };
+        let guid = windows_sys::core::GUID::from_u128(provider.guid);
+        let status = unsafe {
+            EnableTraceEx2(
+                self.handle,
+                &guid,
+                EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                provider.level,
+                provider.any_keyword,
+                0,
+                0,
+                &parameters,
+            )
+        };
+        if status == ERROR_SUCCESS { Ok(()) } else { Err(status) }
+    }
+
     /// Останавливает сессию и возвращает её финальные счётчики.
     ///
     /// Остановка — единственное, что разблокирует `ProcessTrace` в потоке потребителя
@@ -241,6 +291,17 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Раскладка `EVENT_FILTER_EVENT_ID`: BOOLEAN, UCHAR, USHORT, затем USHORT на каждый номер.
+    #[test]
+    fn the_event_id_filter_matches_the_c_layout() {
+        assert_eq!(encode_event_id_filter(&[184, 166]), vec![1, 0, 2, 0, 184, 0, 166, 0]);
+        assert_eq!(
+            std::mem::size_of::<windows_sys::Win32::System::Diagnostics::Etw::EVENT_FILTER_EVENT_ID>(
+            ),
+            encode_event_id_filter(&[1]).len()
+        );
+    }
 
     /// Без прав сессия не поднимется, и это должно быть сказано понятным текстом, а не кодом.
     /// Тест не требует прав: он проверяет обе ветки классификации.

@@ -94,6 +94,7 @@ impl FrameSource for FakeSource {
             statistics,
             last_frame_at_ms: Some(1_000),
             diagnostics: format!("подставной {:?}", self.kind),
+            presentation: None,
         }
     }
 
@@ -302,20 +303,63 @@ fn an_exhausted_target_is_not_restarted_on_every_poll() {
 
 /// Метаться между источниками на одной игре — значит перезапускать захват по кругу.
 #[test]
-fn the_fallback_is_sticky_for_the_same_target() {
+fn a_delivering_fallback_is_sticky_for_the_same_target() {
     let mut rig = rig();
     rig.primary.set_status(FrameStatus::NoFrames);
     rig.capture.set_target(Some(&game(4242, 1)));
     rig.capture.poll(0);
 
-    // Даже если бы основной источник «починился», на этой игре он уже не пробуется.
+    // Даже если бы основной источник «починился», пока запасной даёт кадры, основной не пробуется.
     rig.primary.set_status(FrameStatus::Measuring);
-    rig.fallback.set_status(FrameStatus::NoFrames);
     for tick in 1..10 {
         rig.capture.poll(tick * 250);
     }
     assert_eq!(rig.primary.starts(), 1);
     assert_eq!(rig.capture.active_kind(), Some(SourceKind::OwnEtw));
+}
+
+/// Ion Fury (OpenGL): PresentMon не успел за первые 5 с, собственный ETW OpenGL не видит вовсе.
+/// Застрять на запасном навсегда — значит так и не показать FPS.
+#[test]
+fn a_silent_fallback_hands_the_target_back_to_the_primary() {
+    let mut rig = rig();
+    rig.primary.set_status(FrameStatus::NoFrames);
+    rig.fallback.set_status(FrameStatus::NoFrames);
+    rig.capture.set_target(Some(&game(4242, 1)));
+
+    rig.capture.poll(0); // основной молчит → запасной
+    assert_eq!(rig.capture.active_kind(), Some(SourceKind::OwnEtw));
+    rig.capture.poll(250); // запасной тоже молчит → обратно
+    assert_eq!(rig.capture.active_kind(), Some(SourceKind::PresentMon));
+    assert_eq!(rig.primary.starts(), 2);
+
+    // Второй раз основной не бросаем: он ждёт кадров, сколько потребуется.
+    for tick in 2..20 {
+        rig.capture.poll(tick * 250);
+    }
+    assert_eq!(rig.capture.active_kind(), Some(SourceKind::PresentMon));
+    assert_eq!(rig.primary.starts(), 2);
+    assert_eq!(rig.fallback.starts(), 1);
+
+    rig.primary.set_status(FrameStatus::Measuring);
+    let state = rig.capture.poll(10_000);
+    assert!(state.is_delivering());
+    assert_eq!(state.detail, None, "вернувшись на основной, об откате больше не говорим");
+}
+
+/// Откат по иной причине (например, неподдерживаемый режим вывода) назад не возвращается:
+/// основной источник там не молчит, он считает неправильно.
+#[test]
+fn a_fallback_for_a_real_failure_stays_even_if_silent() {
+    let mut rig = rig();
+    rig.primary.set_status(FrameStatus::Failed(Failure::new(FpsReason::PresentModeUntracked)));
+    rig.fallback.set_status(FrameStatus::NoFrames);
+    rig.capture.set_target(Some(&game(4242, 1)));
+    for tick in 0..10 {
+        rig.capture.poll(tick * 250);
+    }
+    assert_eq!(rig.capture.active_kind(), Some(SourceKind::OwnEtw));
+    assert_eq!(rig.primary.starts(), 1);
 }
 
 #[test]

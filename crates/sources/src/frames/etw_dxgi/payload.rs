@@ -24,6 +24,18 @@ pub const DXGI_PRESENT_START_ID: u16 = 42;
 /// `Microsoft-Windows-D3D9`, `Present_Start`. Проверено на GTA: San Andreas.
 pub const D3D9_PRESENT_START_ID: u16 = 1;
 
+/// `Microsoft-Windows-DxgKrnl`, событие 184 — вызов вывода кадра ядром (`D3DKMTPresent`).
+///
+/// Так кадры видны у OpenGL-игр в окне, которые выводят через GDI-копию: провайдеры рантайма
+/// у них молчат, PresentMon теряет большую часть кадров. Проверено на Ion Fury пробником
+/// `examples/probe_dxgkrnl`: интервалы события совпали со счётчиком игры при 165, ~175 и ~520
+/// FPS, ни одного интервала короче 1 мс (PLAN.md §2.16).
+pub const KERNEL_PRESENT_ID: u16 = 184;
+
+/// Сколько рантайм должен молчать, прежде чем кадры берутся из событий ядра. У DirectX-игр в
+/// окне ядро тоже сообщает о выводе — считать его вместе с рантаймом значило бы удвоить FPS.
+pub const RUNTIME_QUIET_MS: i64 = 1_000;
+
 /// `DXGI_PRESENT_TEST`.
 ///
 /// Такой вызов `Present` **не выводит кадр на экран** — это проверка, не перекрыто ли окно.
@@ -166,6 +178,10 @@ pub struct Counters {
     pub malformed: u64,
     /// Получившихся кадров (дельт).
     pub frames: u64,
+    /// Событий вывода от ядра у цели.
+    pub kernel_presents: u64,
+    /// Кадров, посчитанных по ядру — пока рантайм молчал.
+    pub kernel_frames: u64,
 }
 
 /// Превращает поток Present-событий в frametime.
@@ -185,6 +201,9 @@ pub struct FrameAccumulator {
     keep_test_presents: bool,
     counters: Counters,
     flag_windows: std::collections::HashMap<u64, FlagWindow>,
+    /// Когда цель в последний раз говорила через рантайм (или когда пришло первое событие ядра).
+    runtime_heard_qpc: Option<i64>,
+    last_kernel_qpc: Option<i64>,
 }
 
 impl FrameAccumulator {
@@ -198,6 +217,8 @@ impl FrameAccumulator {
             keep_test_presents: false,
             counters: Counters::default(),
             flag_windows: std::collections::HashMap::new(),
+            runtime_heard_qpc: None,
+            last_kernel_qpc: None,
         }
     }
 
@@ -226,6 +247,29 @@ impl FrameAccumulator {
         self.last_present_qpc = None;
         self.counters = Counters::default();
         self.flag_windows.clear();
+        self.runtime_heard_qpc = None;
+        self.last_kernel_qpc = None;
+    }
+
+    /// Событие вывода от ядра. Кадр — только если рантайм молчит не меньше
+    /// [`RUNTIME_QUIET_MS`]; отсчёт тишины начинается и с первого события ядра, чтобы событие
+    /// рантайма, доставленное чуть позже, не успело удвоить счёт.
+    pub fn on_kernel_present(&mut self, timestamp_qpc: i64) -> Option<f64> {
+        self.counters.kernel_presents += 1;
+        let quiet_since = *self.runtime_heard_qpc.get_or_insert(timestamp_qpc);
+        let quiet_qpc = RUNTIME_QUIET_MS * self.qpc_frequency / 1_000;
+        if timestamp_qpc - quiet_since < quiet_qpc {
+            self.last_kernel_qpc = None;
+            return None;
+        }
+        let previous = self.last_kernel_qpc.replace(timestamp_qpc)?;
+        let delta = timestamp_qpc.checked_sub(previous)?;
+        if delta <= 0 {
+            return None;
+        }
+        let frametime_ms = delta as f64 * 1000.0 / self.qpc_frequency as f64;
+        self.counters.kernel_frames += 1;
+        Some(frametime_ms)
     }
 
     /// Решает, засчитывать ли помеченный вызов, и заодно учитывает любой вызов DXGI в окне.
@@ -270,6 +314,9 @@ impl FrameAccumulator {
         now_ms: Millis,
     ) -> Option<f64> {
         self.counters.presents += 1;
+        // Рантайм заговорил — кадры снова считаются по нему, а цепочка ядра начинается заново.
+        self.runtime_heard_qpc = Some(timestamp_qpc);
+        self.last_kernel_qpc = None;
 
         let Some(payload) = parse_present_payload(user_data) else {
             self.counters.malformed += 1;
@@ -309,6 +356,62 @@ mod tests {
     use super::*;
 
     const QPC: i64 = 10_000_000;
+
+    /// Ion Fury: только ядро, 165 FPS. Первая секунда — ожидание тишины рантайма.
+    #[test]
+    fn kernel_presents_become_frames_when_the_runtime_is_silent() {
+        let mut accumulator = FrameAccumulator::new(QPC);
+        let step = QPC / 165;
+        let mut frames = Vec::new();
+        for index in 0..400 {
+            if let Some(ms) = accumulator.on_kernel_present(index * step) {
+                frames.push(ms);
+            }
+        }
+        // Первые ~165 событий уходят на ожидание, дальше — кадр на событие.
+        assert!((230..=236).contains(&frames.len()), "{}", frames.len());
+        assert!(frames.iter().all(|ms| (ms - 1000.0 / 165.0).abs() < 0.01));
+        assert_eq!(accumulator.counters().kernel_presents, 400);
+    }
+
+    /// DirectX-игра в окне: ядро сообщает о выводе вместе с рантаймом — кадры только по рантайму.
+    #[test]
+    fn kernel_presents_never_double_a_runtime_stream() {
+        let mut accumulator = FrameAccumulator::new(QPC);
+        let step = QPC / 100;
+        let mut frames = 0;
+        for index in 0..500 {
+            let qpc = index * step;
+            if accumulator.on_present_start(ProviderKind::Dxgi, qpc, &payload(0xAA, 0), 0).is_some()
+            {
+                frames += 1;
+            }
+            if accumulator.on_kernel_present(qpc + step / 2).is_some() {
+                frames += 1000;
+            }
+        }
+        assert_eq!(frames, 499, "кадры только от рантайма");
+        assert_eq!(accumulator.counters().kernel_frames, 0);
+    }
+
+    /// Рантайм замолчал — через секунду кадры идут из ядра, без гигантской первой дельты.
+    #[test]
+    fn a_silent_runtime_hands_over_to_the_kernel_cleanly() {
+        let mut accumulator = FrameAccumulator::new(QPC);
+        let step = QPC / 100;
+        for index in 0..100 {
+            accumulator.on_present_start(ProviderKind::Dxgi, index * step, &payload(0xAA, 0), 0);
+        }
+        let start = 100 * step;
+        let mut frames = Vec::new();
+        for index in 0..300 {
+            if let Some(ms) = accumulator.on_kernel_present(start + index * step) {
+                frames.push(ms);
+            }
+        }
+        assert!(!frames.is_empty());
+        assert!(frames.iter().all(|ms| (ms - 10.0).abs() < 0.01), "{frames:?}");
+    }
 
     /// Payload так и выглядит в жизни: указатель, затем флаги, затем SyncInterval.
     fn payload(chain: u64, flags: u32) -> Vec<u8> {

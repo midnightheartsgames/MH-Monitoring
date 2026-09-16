@@ -74,16 +74,19 @@ impl FrameSource for EtwSource {
             status,
             statistics: report.statistics,
             last_frame_at_ms: report.last_frame_at_ms,
+            presentation: None,
             diagnostics: format!(
                 "Present {}, кадров {}, тестовых {}, помеченных-кадров {}, чужих цепочек {}, \
-                 битых {}, потеряно событий {}",
+                 битых {}, потеряно событий {}; ядро: вызовов {}, кадров {}",
                 counters.presents,
                 counters.frames,
                 counters.test_presents,
                 counters.flagged_frames,
                 counters.other_chain,
                 counters.malformed,
-                report.events_lost
+                report.events_lost,
+                counters.kernel_presents,
+                counters.kernel_frames
             ),
         }
     }

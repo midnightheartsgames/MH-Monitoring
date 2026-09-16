@@ -277,7 +277,12 @@ fn stopping_twice_is_harmless() {
     let mut session =
         CaptureSession::start(&launcher, &command(), clock, Some(4242), 1).expect("запуск");
     assert!(session.stop());
-    session.stop();
+    // Второй вызов — из `Drop` после явной остановки. Он не имеет права ждать таймаут: так
+    // выход из приложения и каждая смена цели тянулись по 2 с.
+    let started = std::time::Instant::now();
+    assert!(session.stop());
+    drop(session);
+    assert!(started.elapsed() < Duration::from_millis(200), "{:?}", started.elapsed());
 }
 
 /// Терминальный статус не должен «отыгрываться» обратно при следующем опросе.
@@ -294,14 +299,52 @@ fn a_terminal_status_is_sticky() {
 
 // --- режим вывода, который PresentMon не отслеживает (§2.16) ------------------------------
 
-const MODE_HEADER: &str = "Application,ProcessID,SwapChainAddress,PresentMode,MsBetweenPresents";
+const MODE_HEADER: &str =
+    "Application,ProcessID,SwapChainAddress,PresentRuntime,PresentMode,MsBetweenPresents";
 
 fn rows_with_mode(count: usize, mode: &str) -> String {
+    rows_with_runtime(count, "DXGI", mode)
+}
+
+fn rows_with_runtime(count: usize, runtime: &str, mode: &str) -> String {
     let mut text = format!("{MODE_HEADER}\n");
     for _ in 0..count {
-        text.push_str(&format!("dmc4.exe,4242,0xAAAA,{mode},16.0\n"));
+        text.push_str(&format!("game.exe,4242,0xAAAA,{runtime},{mode},16.0\n"));
     }
     text
+}
+
+/// Ion Fury (OpenGL) в окне: PresentMon теряет кадры, а собственный ETW видит их через ядро —
+/// значит, откатываемся и здесь.
+#[test]
+fn an_opengl_gdi_stream_fails_too() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let launcher = FakeLauncher::new(Script::stdout_text(&rows_with_runtime(
+        40,
+        "Other",
+        "Composed: Copy with GPU GDI",
+    )));
+    let mut session = start(&launcher, clock);
+    let report = wait_until(&mut session, 1_000, |r| r.status.is_terminal());
+    assert!(matches!(
+        report.status,
+        SessionStatus::Failed(Failure { reason: FpsReason::PresentModeUntracked, .. })
+    ));
+}
+
+/// Рантайм, о котором мы ничего не знаем, — остаёмся на PresentMon: откатываться вслепую нельзя.
+#[test]
+fn an_unknown_runtime_keeps_measuring() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let launcher = FakeLauncher::new(Script::stdout_text(&rows_with_runtime(
+        40,
+        "Future",
+        "Composed: Copy with GPU GDI",
+    )));
+    let mut session = start(&launcher, clock);
+    let report = wait_until(&mut session, 1_000, |r| r.counters.parsed >= 40);
+    assert_eq!(report.status, SessionStatus::Measuring);
+    session.stop();
 }
 
 #[test]
@@ -338,31 +381,41 @@ fn a_flip_stream_keeps_measuring() {
 fn recent_modes_need_a_warm_up_and_a_clear_majority() {
     let mut modes = RecentModes::default();
     for _ in 0..7 {
-        modes.record(Some("Composed: Copy with GPU GDI"));
+        modes.record(Some("Composed: Copy with GPU GDI"), Some("DXGI"));
     }
     assert_eq!(modes.dominant_untracked(), None, "семи кадров мало для решения");
-    modes.record(Some("Composed: Copy with GPU GDI"));
+    modes.record(Some("Composed: Copy with GPU GDI"), Some("DXGI"));
     assert_eq!(modes.dominant_untracked(), Some("Composed: Copy with GPU GDI"));
 
     // Переход на полный экран: свежие кадры — Independent Flip, старые вытесняются.
     for _ in 0..32 {
-        modes.record(Some("Hardware Composed: Independent Flip"));
+        modes.record(Some("Hardware Composed: Independent Flip"), Some("DXGI"));
     }
     assert_eq!(modes.dominant_untracked(), None);
 
     // Половина на половину — не повод бросать основной источник.
     for index in 0..32 {
         let mode = if index % 2 == 0 { "Composed: Copy with GPU GDI" } else { "Composed: Flip" };
-        modes.record(Some(mode));
+        modes.record(Some(mode), Some("DXGI"));
     }
     assert_eq!(modes.dominant_untracked(), None);
+}
+
+#[test]
+fn the_presentation_names_the_runtime_and_the_mode() {
+    let mut modes = RecentModes::default();
+    assert_eq!(modes.presentation(), None);
+    modes.record(Some("Hardware: Legacy Flip"), Some("Other"));
+    assert_eq!(modes.presentation().as_deref(), Some("Other · Hardware: Legacy Flip"));
+    modes.record(Some("Composed: Flip"), Some("DXGI"));
+    assert_eq!(modes.presentation().as_deref(), Some("DXGI · Composed: Flip"));
 }
 
 #[test]
 fn rows_without_a_mode_column_never_trigger() {
     let mut modes = RecentModes::default();
     for _ in 0..40 {
-        modes.record(None);
+        modes.record(None, None);
     }
     assert_eq!(modes.dominant_untracked(), None);
 }

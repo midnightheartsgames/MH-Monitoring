@@ -10,7 +10,9 @@
 //! переводились бы по масштабу не того монитора.
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
-use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW,
@@ -108,6 +110,19 @@ pub fn is_on_any_monitor(rect: ScreenRect) -> bool {
     !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_null()
 }
 
+/// Рабочая область (без панели задач) монитора, на котором больше всего от `rect`.
+pub fn work_area_near(rect: ScreenRect) -> Option<ScreenRect> {
+    let rect = RECT { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+    let monitor = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST) };
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return None;
+    }
+    let work = info.rcWork;
+    Some(ScreenRect { left: work.left, top: work.top, right: work.right, bottom: work.bottom })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +133,11 @@ mod tests {
         let far =
             ScreenRect { left: -1_000_000, top: -1_000_000, right: -999_000, bottom: -999_000 };
         assert!(!is_on_any_monitor(far));
+    }
+
+    #[test]
+    fn the_primary_monitor_has_a_work_area() {
+        let area = work_area_near(ScreenRect { left: 10, top: 10, right: 50, bottom: 50 }).unwrap();
+        assert!(area.right > area.left && area.bottom > area.top);
     }
 }

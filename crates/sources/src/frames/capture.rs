@@ -32,6 +32,9 @@ pub struct FrameCapture {
     on_fallback: bool,
     /// Почему ушли с основного источника — для сообщения пользователю.
     fallback_cause: Option<FpsReason>,
+    /// Запасной источник уже пробовали на этой цели, и он тоже не увидел ни кадра. Второй раз
+    /// основной не бросаем: у OpenGL-игр кадры видит только он (Ion Fury, PLAN.md §2.16).
+    fallback_exhausted: bool,
     /// Итог, дальше которого для этой цели идти некуда. Сбрасывается сменой цели.
     parked: Option<(Failure, SourceKind)>,
     session_id: u64,
@@ -51,6 +54,7 @@ impl FrameCapture {
             active: None,
             on_fallback: false,
             fallback_cause: None,
+            fallback_exhausted: false,
             parked: None,
             session_id: 0,
             last_diagnostics: None,
@@ -90,6 +94,7 @@ impl FrameCapture {
         // История и выбор источника принадлежат прошлой игре.
         self.on_fallback = false;
         self.fallback_cause = None;
+        self.fallback_exhausted = false;
         self.parked = None;
     }
 
@@ -115,7 +120,29 @@ impl FrameCapture {
 
         let report = self.poll_active(now_ms);
 
-        if !self.on_fallback && self.fallback.is_some() && runtime_allows_fallback(&report.status) {
+        // Откат на «нет кадров» не помог: запасной источник тоже молчит. Возвращаемся к основному —
+        // он видит больше рантаймов и, в отличие от запасного, ждёт кадров сколько угодно.
+        if self.on_fallback
+            && self.fallback_cause == Some(FpsReason::NoFrames)
+            && report.status == FrameStatus::NoFrames
+        {
+            self.stop_active();
+            self.on_fallback = false;
+            self.fallback_cause = None;
+            self.fallback_exhausted = true;
+            if !self.start(&target) {
+                return self.parked_state(&target);
+            }
+            let report = self.poll_active(now_ms);
+            return self.report_state(report, &target);
+        }
+
+        let may_fall_back = !(self.fallback_exhausted && report.status == FrameStatus::NoFrames);
+        if !self.on_fallback
+            && may_fall_back
+            && self.fallback.is_some()
+            && runtime_allows_fallback(&report.status)
+        {
             let cause = cause_of(&report.status);
             self.stop_active();
             self.switch_to_fallback(cause);
@@ -220,6 +247,7 @@ impl FrameCapture {
             statistics: report.statistics,
             session_id: self.session_id,
             last_frame_at_ms: report.last_frame_at_ms,
+            presentation: report.presentation,
         }
     }
 

@@ -21,7 +21,7 @@ use mh_platform::etw::{
 
 use crate::clock::Clock;
 
-use super::payload::{Counters, FrameAccumulator, ProviderKind};
+use super::payload::{Counters, FrameAccumulator, KERNEL_PRESENT_ID, ProviderKind};
 
 /// `Microsoft-Windows-DXGI`. GUID и keywords сняты с дампа живой сессии PresentMon, а не из
 /// документации (PLAN.md §2.9).
@@ -41,6 +41,17 @@ pub const PROVIDER_D3D9: Provider = Provider {
     guid: 0x783ACA0A_790E_4D7F_8451_AA850511C6B9,
     level: 4,
     any_keyword: 0x8000_0000_0000_0002,
+};
+
+/// `Microsoft-Windows-DxgKrnl` — только ради события вывода кадра ядром (OpenGL в окне).
+///
+/// Включается **с фильтром по номеру события**: без него даже на этих настройках идут десятки
+/// тысяч событий в секунду, с ним — ровно одно на кадр (проверено пробником на Ion Fury).
+pub const PROVIDER_DXGKRNL: Provider = Provider {
+    label: "Microsoft-Windows-DxgKrnl",
+    guid: 0x802EC45A_1E99_4B83_9920_87C98277BA9D,
+    level: 4,
+    any_keyword: 0x1,
 };
 
 /// Сколько ждать первый кадр, прежде чем признать, что их нет.
@@ -94,6 +105,7 @@ struct FrameSink {
     clock: Arc<dyn Clock>,
     dxgi_guid: u128,
     d3d9_guid: u128,
+    kernel_guid: u128,
 }
 
 impl EventSink for FrameSink {
@@ -103,19 +115,24 @@ impl EventSink for FrameSink {
         if event.process_id != self.target_process_id {
             return;
         }
-        let provider = if event.provider_guid == self.dxgi_guid {
-            ProviderKind::Dxgi
-        } else if event.provider_guid == self.d3d9_guid {
-            ProviderKind::D3d9
-        } else {
-            return;
-        };
-        if !provider.is_present_start(event.event_id) {
-            return;
-        }
-
         let now_ms = self.clock.now_ms();
-        let frametime_ms = {
+        let frametime_ms = if event.provider_guid == self.kernel_guid {
+            if event.event_id != KERNEL_PRESENT_ID {
+                return;
+            }
+            let mut accumulator = self.accumulator.lock().unwrap_or_else(|e| e.into_inner());
+            accumulator.on_kernel_present(event.timestamp_qpc)
+        } else {
+            let provider = if event.provider_guid == self.dxgi_guid {
+                ProviderKind::Dxgi
+            } else if event.provider_guid == self.d3d9_guid {
+                ProviderKind::D3d9
+            } else {
+                return;
+            };
+            if !provider.is_present_start(event.event_id) {
+                return;
+            }
             let mut accumulator = self.accumulator.lock().unwrap_or_else(|e| e.into_inner());
             accumulator.on_present_start(provider, event.timestamp_qpc, event.user_data, now_ms)
         };
@@ -141,6 +158,11 @@ pub struct EtwFrameSource {
     reader_done: mpsc::Receiver<mh_platform::etw::consumer::ProcessStatus>,
     started_at_ms: Millis,
     ended: bool,
+    /// Сообщение потока чтения уже получено. Второго не будет — ждать его нельзя.
+    reader_finished: bool,
+    /// Итог первой остановки. Повторная (явная, а потом из `Drop`) не ждёт заново: иначе
+    /// каждая смена цели и каждый выход стояли бы полный таймаут.
+    stopped: Option<bool>,
     ordered: Vec<f32>,
     scratch: Vec<f32>,
 }
@@ -195,7 +217,10 @@ impl EtwFrameSource {
         let enabled = [&PROVIDER_DXGI, &PROVIDER_D3D9]
             .into_iter()
             .filter(|provider| session.enable_provider(provider, None).is_ok())
-            .count();
+            .count()
+            + usize::from(
+                session.enable_provider_filtered(&PROVIDER_DXGKRNL, &[KERNEL_PRESENT_ID]).is_ok(),
+            );
         if enabled == 0 {
             return Err(EtwStartError::NoProviders);
         }
@@ -210,6 +235,7 @@ impl EtwFrameSource {
             clock: Arc::clone(&clock),
             dxgi_guid: PROVIDER_DXGI.guid,
             d3d9_guid: PROVIDER_D3D9.guid,
+            kernel_guid: PROVIDER_DXGKRNL.guid,
         });
 
         // Шаг 4.
@@ -239,6 +265,8 @@ impl EtwFrameSource {
             reader_done,
             started_at_ms,
             ended: false,
+            reader_finished: false,
+            stopped: None,
             ordered: Vec::new(),
             scratch: Vec::new(),
         })
@@ -255,7 +283,8 @@ impl EtwFrameSource {
 
     pub fn poll(&mut self, now_ms: Millis) -> EtwReport {
         // Поток чтения вернулся сам — значит сессию кто-то остановил снаружи.
-        if self.reader_done.try_recv().is_ok() {
+        if !self.reader_finished && self.reader_done.try_recv().is_ok() {
+            self.reader_finished = true;
             self.ended = true;
         }
 
@@ -299,9 +328,16 @@ impl EtwFrameSource {
     /// Остановка сессии — единственное, что разблокирует `ProcessTrace`. Ждать поток чтения,
     /// не остановив сессию, значит ждать вечно (PLAN.md §2.8).
     pub fn stop(&mut self) -> bool {
+        if let Some(result) = self.stopped {
+            return result;
+        }
         self.stop.store(true, Ordering::SeqCst);
         self.session.stop();
-        self.reader_done.recv_timeout(Duration::from_millis(READER_JOIN_TIMEOUT_MS)).is_ok()
+        let joined = self.reader_finished
+            || self.reader_done.recv_timeout(Duration::from_millis(READER_JOIN_TIMEOUT_MS)).is_ok();
+        self.reader_finished |= joined;
+        self.stopped = Some(joined);
+        joined
     }
 }
 

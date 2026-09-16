@@ -25,13 +25,13 @@ impl SourceKind {
 
     /// Чего этот источник не видит, — пользователь обязан это знать, когда на нём сидит.
     ///
-    /// Для собственного ETW это **OpenGL**, а не Vulkan, как предполагал PLAN.md §2.4 до
-    /// измерения: Vulkan в оконном и безрамочном режиме на NVIDIA виден, OpenGL — нет
-    /// (`spikes/etw-frames/COVERAGE.md` §4).
+    /// Для собственного ETW это **OpenGL на весь экран**. Vulkan в оконном и безрамочном режиме
+    /// на NVIDIA виден через DXGI (`spikes/etw-frames/COVERAGE.md` §4), OpenGL в окне — через
+    /// событие вывода ядра (PLAN.md §2.16). OpenGL на весь экран этим путём не проверен.
     pub fn coverage_gap(self) -> Option<&'static str> {
         match self {
             SourceKind::PresentMon => None,
-            SourceKind::OwnEtw => Some("OpenGL-игры не видны"),
+            SourceKind::OwnEtw => Some("OpenGL на весь экран может быть не виден"),
         }
     }
 }
@@ -79,6 +79,8 @@ pub struct FrameReport {
     /// приходят и все до одного отбрасываются» — именно так фильтр тестовых Present, ошибочно
     /// применённый к D3D9, скрыл всю Devil May Cry 4 SE и был найден лишь рассуждением.
     pub diagnostics: String,
+    /// Рантайм и режим вывода последних кадров, если источник их знает.
+    pub presentation: Option<String>,
 }
 
 /// Живой сеанс захвата кадров одного процесса.

@@ -22,7 +22,9 @@ use crate::clock::Clock;
 
 use super::child::{CaptureChild, CaptureLauncher};
 use super::command::CaptureCommand;
-use super::csv::{RowRejection, Schema, is_untracked_present_mode, parse_row};
+use super::csv::{
+    RowRejection, Schema, fallback_sees_runtime, is_untracked_present_mode, parse_row,
+};
 use super::diagnosis::{
     BoundedTail, Failure, MAX_ERROR_LINES, classify_exit_code, classify_stderr,
 };
@@ -102,6 +104,9 @@ pub(super) struct RecentModes {
     bits: u32,
     seen: u32,
     last_untracked: Option<String>,
+    /// Режим и рантайм последнего кадра — для диагностики.
+    last_mode: Option<String>,
+    last_runtime: Option<String>,
 }
 
 impl RecentModes {
@@ -109,13 +114,34 @@ impl RecentModes {
     /// До этого числа кадров решения нет: пара строк при переключении режима — не повод.
     const MIN_FRAMES: u32 = 8;
 
-    pub(super) fn record(&mut self, mode: Option<&str>) {
-        let untracked = mode.is_some_and(is_untracked_present_mode);
+    /// `runtime` — колонка `PresentRuntime`. Кадр считается «потерянным», только если запасной
+    /// источник его увидит: иначе откат оставил бы игру совсем без FPS. Без колонки рантайма
+    /// решаем по одному режиму — в 2.5.1 она всегда есть.
+    pub(super) fn record(&mut self, mode: Option<&str>, runtime: Option<&str>) {
+        let untracked = mode.is_some_and(is_untracked_present_mode)
+            && runtime.is_none_or(fallback_sees_runtime);
         self.bits = (self.bits << 1) | u32::from(untracked);
         self.seen = (self.seen + 1).min(Self::WINDOW);
+        // Строки меняются редко, а кадров тысячи: копируем только при смене.
+        if let Some(mode) = mode
+            && self.last_mode.as_deref() != Some(mode)
+        {
+            self.last_mode = Some(mode.to_string());
+        }
+        if let Some(runtime) = runtime
+            && self.last_runtime.as_deref() != Some(runtime)
+        {
+            self.last_runtime = Some(runtime.to_string());
+        }
         if untracked && self.last_untracked.as_deref() != mode {
             self.last_untracked = mode.map(str::to_string);
         }
+    }
+
+    /// «DXGI · Composed: Flip» последнего кадра.
+    pub(super) fn presentation(&self) -> Option<String> {
+        let mode = self.last_mode.as_deref()?;
+        Some(format!("{} · {mode}", self.last_runtime.as_deref().unwrap_or("?")))
     }
 
     /// Режим, если свежие кадры в основном идут через него (не меньше трёх четвертей).
@@ -185,6 +211,8 @@ pub struct SessionReport {
     pub swap_chain: Option<String>,
     pub last_frame_at_ms: Option<Millis>,
     pub session_id: u64,
+    /// «DXGI · Composed: Flip» последнего кадра.
+    pub presentation: Option<String>,
 }
 
 /// Живой сеанс захвата.
@@ -194,6 +222,11 @@ pub struct CaptureSession {
     stop: Arc<AtomicBool>,
     reader_done: mpsc::Receiver<()>,
     readers: usize,
+    /// Сколько потоков чтения уже отчитались о завершении.
+    readers_joined: usize,
+    /// Итог первой остановки. Повторная (явная, а потом из `Drop`) не ждёт заново: сообщения
+    /// читателей уже забраны, и ожидание стояло бы полный таймаут на каждой смене цели и на выходе.
+    stopped: Option<bool>,
     started_at_ms: Millis,
     session_id: u64,
     /// Кэш итога: после терминального статуса он не меняется.
@@ -271,6 +304,8 @@ impl CaptureSession {
             stop,
             reader_done,
             readers,
+            readers_joined: 0,
+            stopped: None,
             started_at_ms,
             session_id,
             finished: None,
@@ -296,9 +331,9 @@ impl CaptureSession {
             let statistics = window.ring.statistics(now_ms, &mut self.ordered, &mut self.scratch);
             (statistics, window.swap_chain.clone(), window.last_frame_at_ms)
         };
-        let untracked_mode = {
+        let (untracked_mode, presentation) = {
             let window = self.shared.window.lock().unwrap_or_else(|e| e.into_inner());
-            window.modes.dominant_untracked().map(str::to_string)
+            (window.modes.dominant_untracked().map(str::to_string), window.modes.presentation())
         };
 
         let status = self.status(now_ms, last_frame_at_ms, untracked_mode);
@@ -309,6 +344,7 @@ impl CaptureSession {
             swap_chain,
             last_frame_at_ms,
             session_id: self.session_id,
+            presentation,
         }
     }
 
@@ -398,16 +434,22 @@ impl CaptureSession {
     /// Возвращает `false`, если хотя бы один читатель не завершился за отведённое время. Такой
     /// поток отцепляется; ребёнок при этом уже мёртв, и ETW-сессию гасит вызывающий по имени.
     pub fn stop(&mut self) -> bool {
+        if let Some(result) = self.stopped {
+            return result;
+        }
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.child.kill();
 
         let deadline = Duration::from_millis(READER_JOIN_TIMEOUT_MS);
-        for _ in 0..self.readers {
+        while self.readers_joined < self.readers {
             if self.reader_done.recv_timeout(deadline).is_err() {
-                return false;
+                break;
             }
+            self.readers_joined += 1;
         }
-        true
+        let joined = self.readers_joined == self.readers;
+        self.stopped = Some(joined);
+        joined
     }
 }
 
@@ -517,7 +559,7 @@ fn handle_line(
     let mut window = shared.window.lock().unwrap_or_else(|e| e.into_inner());
     if window.ring.record(frame.frame_time_ms, now_ms) {
         window.last_frame_at_ms = Some(now_ms);
-        window.modes.record(frame.present_mode);
+        window.modes.record(frame.present_mode, frame.present_runtime);
         if window.swap_chain.as_ref() != swap_chains.selected() {
             window.swap_chain = swap_chains.selected().cloned();
         }

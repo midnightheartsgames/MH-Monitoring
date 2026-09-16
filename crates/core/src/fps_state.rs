@@ -156,6 +156,9 @@ pub struct FpsState {
     pub session_id: u64,
     /// Когда принят последний кадр. `None`, пока сеанс не дал ни одного.
     pub last_frame_at_ms: Option<Millis>,
+    /// Как игра выводит кадры, по словам источника: «DXGI · Composed: Flip». Для диагностики:
+    /// режим `Hardware: Legacy Flip` идёт мимо композитора, и никакое окно поверх не видно.
+    pub presentation: Option<String>,
 }
 
 impl FpsState {
@@ -167,6 +170,7 @@ impl FpsState {
         statistics: FrameStatistics::EMPTY,
         session_id: 0,
         last_frame_at_ms: None,
+        presentation: None,
     };
 
     /// Одна короткая строка для HUD, либо ничего, если сказать нечего.

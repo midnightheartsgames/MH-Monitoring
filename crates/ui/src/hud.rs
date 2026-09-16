@@ -4,6 +4,8 @@
 //! заодно показывает её главное число. Новое — строка причины под секцией, если секция заполнена
 //! не целиком: прочерк без объяснения план запрещает.
 
+use std::collections::BTreeSet;
+
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Layout, Margin, Pos2, Rect, RichText, Sense, Shape,
     Stroke, Ui, Vec2, pos2, vec2,
@@ -11,7 +13,7 @@ use eframe::egui::{
 use mh_core::{FpsAvailability, FrametimeGraph, SectionHealth, SensorStatus, Snapshot};
 
 use crate::format::{self, EMPTY, WARMING_UP};
-use crate::settings::OverlaySettings;
+use crate::settings::{Metric, Settings};
 use crate::theme;
 
 const PADDING_X: i8 = 11;
@@ -19,6 +21,7 @@ const PADDING_Y: i8 = 7;
 const GRAPH_HEIGHT: f32 = 56.0;
 /// Эталонная линия графика — 60 FPS.
 const REFERENCE_MS: f32 = 16.67;
+const PRIMARY: Color32 = theme::TEXT_PRIMARY;
 
 /// Что пользователь сделал в HUD за этот кадр.
 #[derive(Debug, Default)]
@@ -27,16 +30,63 @@ pub struct HudActions {
     pub hide: bool,
 }
 
+/// Строки, которые хоть раз показали значение. Такая строка держит место, даже если значение
+/// пропало, — иначе раскладка прыгала бы от каждого пропуска датчика.
+pub type SeenRows = BTreeSet<Metric>;
+
+struct Rows<'a> {
+    settings: &'a Settings,
+    seen: &'a mut SeenRows,
+    warming_up: bool,
+}
+
+impl Rows<'_> {
+    /// Строка с учётом настроек. `always_visible` — для значений, которые по природе приходят
+    /// поздно (процентили ждут сотни кадров): они не должны появляться посреди сеанса.
+    fn row(
+        &mut self,
+        ui: &mut Ui,
+        metric: Metric,
+        label: &str,
+        value: Option<String>,
+        color: Color32,
+        always_visible: bool,
+    ) {
+        if !self.settings.metrics.is_enabled(metric) {
+            return;
+        }
+        if value.is_some() {
+            self.seen.insert(metric);
+        }
+        let hidden = self.settings.metrics.hide_unavailable
+            && !always_visible
+            && !self.warming_up
+            && !self.seen.contains(&metric);
+        if value.is_none() && hidden {
+            return;
+        }
+        let text = value_or_empty(value, self.warming_up);
+        metric_row(ui, label, &text, color);
+    }
+
+    /// Показывать ли секцию. С «скрывать недоступное» пустая секция исчезает целиком.
+    fn section_visible(&self, enabled: bool, has_any_value: bool) -> bool {
+        enabled && (!self.settings.metrics.hide_unavailable || self.warming_up || has_any_value)
+    }
+}
+
 /// Рисует HUD. Возвращает прямоугольник, который он занял, — по нему подгоняется окно.
 pub fn show(
     ui: &mut Ui,
     snapshot: &Snapshot,
-    settings: &OverlaySettings,
+    settings: &Settings,
+    seen: &mut SeenRows,
     notes: &[String],
     actions: &mut HudActions,
 ) -> Rect {
+    let overlay = &settings.overlay;
     let frame = egui::Frame::new()
-        .fill(theme::background(settings.opacity))
+        .fill(theme::background(overlay.opacity))
         .corner_radius(CornerRadius::same(4))
         .inner_margin(Margin::symmetric(PADDING_X, PADDING_Y));
     frame
@@ -44,21 +94,38 @@ pub fn show(
             let width = theme::OVERLAY_WIDTH - 2.0 * f32::from(PADDING_X);
             ui.set_width(width);
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            let warming_up = snapshot.is_warming_up();
+            let mut rows = Rows { settings, seen, warming_up: snapshot.is_warming_up() };
 
-            if settings.show_header && !settings.locked {
+            if overlay.show_header && !overlay.locked {
                 header(ui, actions);
             }
-            gpu(ui, snapshot, warming_up);
-            divider(ui);
-            cpu(ui, snapshot, warming_up);
-            divider(ui);
-            memory(ui, snapshot, warming_up);
-            divider(ui);
-            fps(ui, snapshot, settings.show_graph, warming_up);
-            // Сообщения самого приложения — например, хоткей занят другой программой.
+            let sections = &settings.sections;
+            let mut needs_divider = false;
+            let mut separate = |ui: &mut Ui| {
+                if needs_divider {
+                    divider(ui);
+                }
+                needs_divider = true;
+            };
+            if rows.section_visible(sections.gpu, snapshot.gpu.has_any_value()) {
+                separate(ui);
+                gpu(ui, snapshot, &mut rows);
+            }
+            if rows.section_visible(sections.cpu, snapshot.cpu.has_any_value()) {
+                separate(ui);
+                cpu(ui, snapshot, &mut rows);
+            }
+            if rows.section_visible(sections.ram, snapshot.memory.has_any_value()) {
+                separate(ui);
+                memory(ui, snapshot, &mut rows);
+            }
+            if sections.fps {
+                separate(ui);
+                fps(ui, snapshot, overlay.show_graph, &mut rows);
+            }
+            // Сообщения самого приложения — хоткей занят, настройки сброшены и т. п.
             if !notes.is_empty() {
-                divider(ui);
+                separate(ui);
                 for note in notes {
                     caption(ui, note);
                 }
@@ -132,7 +199,7 @@ fn section_title(ui: &mut Ui, title: &str, value: &str) {
 }
 
 /// «label ......... value». Значения выровнены вправо, чтобы цифры не сдвигали строку.
-fn metric(ui: &mut Ui, label: &str, value: &str, color: Color32) {
+fn metric_row(ui: &mut Ui, label: &str, value: &str, color: Color32) {
     ui.add_space(1.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).font(theme::regular(12.5)).color(theme::TEXT_SECONDARY));
@@ -166,79 +233,69 @@ fn value_or_empty(value: Option<String>, warming_up: bool) -> String {
     value.unwrap_or_else(|| if warming_up { WARMING_UP } else { EMPTY }.to_string())
 }
 
-fn gpu(ui: &mut Ui, snapshot: &Snapshot, warming_up: bool) {
+fn gpu(ui: &mut Ui, snapshot: &Snapshot, rows: &mut Rows<'_>) {
     let gpu = &snapshot.gpu;
-    let v = |value: Option<String>| value_or_empty(value, warming_up);
-    section_title(ui, "GPU", &v(gpu.load_percent.map(format::percent)));
-    metric(
-        ui,
-        "Temp",
-        &v(gpu.temperature_c.map(format::temperature)),
-        theme::for_temperature(gpu.temperature_c),
-    );
-    metric(ui, "Clock", &v(gpu.core_clock_mhz.map(format::frequency)), theme::TEXT_PRIMARY);
-    metric(
-        ui,
-        "VRAM",
-        &v(format::bytes_pair(gpu.vram_used_bytes, gpu.vram_total_bytes)),
-        theme::TEXT_PRIMARY,
-    );
-    metric(ui, "Power", &v(gpu.power_watts.map(format::power)), theme::TEXT_PRIMARY);
-    metric(ui, "Fan", &v(gpu.fan_rpm.map(format::rpm)), theme::TEXT_PRIMARY);
+    let load = value_or_empty(gpu.load_percent.map(format::percent), rows.warming_up);
+    section_title(ui, "GPU", &load);
+    let temperature_color = theme::for_temperature(gpu.temperature_c);
+    let temperature = gpu.temperature_c.map(format::temperature);
+    rows.row(ui, Metric::GpuTemperature, "Temp", temperature, temperature_color, false);
+    let clock = gpu.core_clock_mhz.map(format::frequency);
+    rows.row(ui, Metric::GpuClock, "Clock", clock, PRIMARY, false);
+    let vram = format::bytes_pair(gpu.vram_used_bytes, gpu.vram_total_bytes);
+    rows.row(ui, Metric::GpuVram, "VRAM", vram, PRIMARY, false);
+    rows.row(ui, Metric::GpuPower, "Power", gpu.power_watts.map(format::power), PRIMARY, false);
+    rows.row(ui, Metric::GpuFan, "Fan", gpu.fan_rpm.map(format::rpm), PRIMARY, false);
     health_note(ui, gpu.health);
 }
 
-fn cpu(ui: &mut Ui, snapshot: &Snapshot, warming_up: bool) {
+fn cpu(ui: &mut Ui, snapshot: &Snapshot, rows: &mut Rows<'_>) {
     let cpu = &snapshot.cpu;
-    let v = |value: Option<String>| value_or_empty(value, warming_up);
-    section_title(ui, "CPU", &v(cpu.load_percent.map(format::percent)));
-    metric(
-        ui,
-        "Temp",
-        &v(cpu.temperature_c.map(format::temperature)),
-        theme::for_temperature(cpu.temperature_c),
-    );
-    metric(ui, "Clock", &v(cpu.clock_mhz.map(format::frequency)), theme::TEXT_PRIMARY);
-    metric(ui, "Power", &v(cpu.power_watts.map(format::power)), theme::TEXT_PRIMARY);
+    let load = value_or_empty(cpu.load_percent.map(format::percent), rows.warming_up);
+    section_title(ui, "CPU", &load);
+    let temperature_color = theme::for_temperature(cpu.temperature_c);
+    let temperature = cpu.temperature_c.map(format::temperature);
+    rows.row(ui, Metric::CpuTemperature, "Temp", temperature, temperature_color, false);
+    rows.row(ui, Metric::CpuClock, "Clock", cpu.clock_mhz.map(format::frequency), PRIMARY, false);
+    rows.row(ui, Metric::CpuPower, "Power", cpu.power_watts.map(format::power), PRIMARY, false);
     health_note(ui, cpu.health);
 }
 
-fn memory(ui: &mut Ui, snapshot: &Snapshot, warming_up: bool) {
+fn memory(ui: &mut Ui, snapshot: &Snapshot, rows: &mut Rows<'_>) {
     let memory = &snapshot.memory;
-    let v = |value: Option<String>| value_or_empty(value, warming_up);
-    section_title(ui, "RAM", &v(memory.load_percent().map(format::percent)));
-    metric(
-        ui,
-        "Used",
-        &v(format::bytes_pair(memory.used_bytes, memory.total_bytes)),
-        theme::TEXT_PRIMARY,
-    );
+    let load = value_or_empty(memory.load_percent().map(format::percent), rows.warming_up);
+    section_title(ui, "RAM", &load);
+    let used = format::bytes_pair(memory.used_bytes, memory.total_bytes);
+    rows.row(ui, Metric::RamUsed, "Used", used, PRIMARY, false);
     health_note(ui, memory.health);
 }
 
-fn fps(ui: &mut Ui, snapshot: &Snapshot, show_graph: bool, warming_up: bool) {
+fn fps(ui: &mut Ui, snapshot: &Snapshot, show_graph: bool, rows: &mut Rows<'_>) {
     let state = &snapshot.fps;
     // Цифры показываются, только пока источник их действительно даёт: устаревшее среднее хуже
     // прочерка.
     let delivering = state.availability == FpsAvailability::Available;
     let stats = if delivering { Some(&state.statistics) } else { None };
-    let v = |value: Option<f64>| value_or_empty(value.and_then(format::fps), false);
+    let fps_text = |value: Option<f64>| value.and_then(format::fps);
 
     ui.horizontal(|ui| {
         ui.label(RichText::new("FPS").font(theme::bold(15.0)).color(theme::TEXT_PRIMARY));
         ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-            let current = stats.and_then(|s| s.current_fps).and_then(format::fps);
+            let current = fps_text(stats.and_then(|s| s.current_fps));
             ui.label(
-                RichText::new(value_or_empty(current, warming_up))
+                RichText::new(value_or_empty(current, rows.warming_up))
                     .font(theme::bold(28.0))
                     .color(theme::ACCENT),
             );
         });
     });
     // Три строки ведут себя одинаково: значение, которое ещё набирается, не повод исчезнуть.
-    metric(ui, "AVG", &v(stats.and_then(|s| s.average_fps)), theme::TEXT_PRIMARY);
-    metric(ui, "1% LOW", &v(stats.and_then(|s| s.low_1_percent_fps)), theme::TEXT_PRIMARY);
-    metric(ui, "0.1% LOW", &v(stats.and_then(|s| s.low_0_1_percent_fps)), theme::TEXT_PRIMARY);
+    let average = fps_text(stats.and_then(|s| s.average_fps));
+    rows.row(ui, Metric::FpsAverage, "AVG", average, PRIMARY, true);
+    let low_1 = fps_text(stats.and_then(|s| s.low_1_percent_fps));
+    rows.row(ui, Metric::FpsLow1, "1% LOW", low_1, PRIMARY, true);
+    let low_01 = fps_text(stats.and_then(|s| s.low_0_1_percent_fps));
+    rows.row(ui, Metric::FpsLow01, "0.1% LOW", low_01, PRIMARY, true);
 
     // Чьи это цифры и почему их нет, когда их нет. Без этой строки живое, устаревшее и
     // отсутствующее значение выглядят одинаково.

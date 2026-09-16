@@ -28,6 +28,8 @@ pub mod pdh;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
+pub mod pump;
+#[cfg(windows)]
 mod sys;
 
 /// Частота `QueryPerformanceCounter`.
