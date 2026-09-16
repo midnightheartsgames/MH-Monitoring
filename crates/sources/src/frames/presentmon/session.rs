@@ -22,7 +22,7 @@ use crate::clock::Clock;
 
 use super::child::{CaptureChild, CaptureLauncher};
 use super::command::CaptureCommand;
-use super::csv::{RowRejection, Schema, parse_row};
+use super::csv::{RowRejection, Schema, is_untracked_present_mode, parse_row};
 use super::diagnosis::{
     BoundedTail, Failure, MAX_ERROR_LINES, classify_exit_code, classify_stderr,
 };
@@ -89,6 +89,44 @@ struct FrameWindow {
     ring: FrametimeRing,
     last_frame_at_ms: Option<Millis>,
     swap_chain: Option<String>,
+    modes: RecentModes,
+}
+
+/// Режимы вывода последних кадров.
+///
+/// Режим меняется на ходу: игра уходит в окно, поверх полноэкранной встаёт наш HUD. Поэтому
+/// решение принимается по свежим кадрам, а не по всему сеансу.
+#[derive(Debug, Default, Clone)]
+pub(super) struct RecentModes {
+    /// Бит на кадр, младший — самый свежий: 1 — режим, который PresentMon не отслеживает.
+    bits: u32,
+    seen: u32,
+    last_untracked: Option<String>,
+}
+
+impl RecentModes {
+    const WINDOW: u32 = 32;
+    /// До этого числа кадров решения нет: пара строк при переключении режима — не повод.
+    const MIN_FRAMES: u32 = 8;
+
+    pub(super) fn record(&mut self, mode: Option<&str>) {
+        let untracked = mode.is_some_and(is_untracked_present_mode);
+        self.bits = (self.bits << 1) | u32::from(untracked);
+        self.seen = (self.seen + 1).min(Self::WINDOW);
+        if untracked && self.last_untracked.as_deref() != mode {
+            self.last_untracked = mode.map(str::to_string);
+        }
+    }
+
+    /// Режим, если свежие кадры в основном идут через него (не меньше трёх четвертей).
+    pub(super) fn dominant_untracked(&self) -> Option<&str> {
+        if self.seen < Self::MIN_FRAMES {
+            return None;
+        }
+        let mask = if self.seen >= 32 { u32::MAX } else { (1u32 << self.seen) - 1 };
+        let untracked = (self.bits & mask).count_ones();
+        (untracked * 4 >= self.seen * 3).then_some(self.last_untracked.as_deref()).flatten()
+    }
 }
 
 #[derive(Debug)]
@@ -184,6 +222,7 @@ impl CaptureSession {
                 ring: FrametimeRing::new(),
                 last_frame_at_ms: None,
                 swap_chain: None,
+                modes: RecentModes::default(),
             }),
             counters: AtomicCounters::default(),
             stderr_tail: Mutex::new(BoundedTail::new(MAX_ERROR_LINES)),
@@ -244,6 +283,11 @@ impl CaptureSession {
         self.session_id
     }
 
+    /// Кадры окна на момент последнего [`Self::poll`], старейший первым.
+    pub fn frametimes(&self) -> &[f32] {
+        &self.ordered
+    }
+
     /// Опрашивает состояние сеанса. Не блокирует.
     pub fn poll(&mut self, now_ms: Millis) -> SessionReport {
         let counters = self.shared.counters.snapshot();
@@ -252,8 +296,12 @@ impl CaptureSession {
             let statistics = window.ring.statistics(now_ms, &mut self.ordered, &mut self.scratch);
             (statistics, window.swap_chain.clone(), window.last_frame_at_ms)
         };
+        let untracked_mode = {
+            let window = self.shared.window.lock().unwrap_or_else(|e| e.into_inner());
+            window.modes.dominant_untracked().map(str::to_string)
+        };
 
-        let status = self.status(now_ms, last_frame_at_ms);
+        let status = self.status(now_ms, last_frame_at_ms, untracked_mode);
         SessionReport {
             status,
             statistics,
@@ -264,7 +312,12 @@ impl CaptureSession {
         }
     }
 
-    fn status(&mut self, now_ms: Millis, last_frame_at_ms: Option<Millis>) -> SessionStatus {
+    fn status(
+        &mut self,
+        now_ms: Millis,
+        last_frame_at_ms: Option<Millis>,
+        untracked_mode: Option<String>,
+    ) -> SessionStatus {
         if let Some(finished) = &self.finished {
             return finished.clone();
         }
@@ -302,6 +355,15 @@ impl CaptureSession {
                 Some(failure) => self.finish(SessionStatus::Failed(failure)),
                 None => self.finish(SessionStatus::Ended { exit_code }),
             };
+        }
+
+        // Кадры идут, но PresentMon видит лишь часть: такому счёту верить нельзя (§2.16).
+        if let Some(mode) = untracked_mode {
+            let failure = Failure {
+                reason: mh_core::FpsReason::PresentModeUntracked,
+                detail: Some(format!("режим вывода «{mode}»")),
+            };
+            return self.finish(SessionStatus::Failed(failure));
         }
 
         match last_frame_at_ms {
@@ -455,6 +517,7 @@ fn handle_line(
     let mut window = shared.window.lock().unwrap_or_else(|e| e.into_inner());
     if window.ring.record(frame.frame_time_ms, now_ms) {
         window.last_frame_at_ms = Some(now_ms);
+        window.modes.record(frame.present_mode);
         if window.swap_chain.as_ref() != swap_chains.selected() {
             window.swap_chain = swap_chains.selected().cloned();
         }

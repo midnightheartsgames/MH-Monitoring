@@ -12,6 +12,7 @@
 
 use crate::Millis;
 use crate::fps_state::FpsState;
+use crate::graph::FrametimeGraph;
 use crate::telemetry::{CpuStats, GpuStats, MemoryStats, SensorStatus, Snapshot};
 
 /// Сколько замер считается свежим.
@@ -42,6 +43,7 @@ pub struct Aggregator {
     slow: Option<HardwareSample>,
     slow_at_ms: Millis,
     fps: FpsState,
+    graph: FrametimeGraph,
     stale_after_ms: Millis,
 }
 
@@ -63,6 +65,7 @@ impl Aggregator {
             slow: None,
             slow_at_ms: 0,
             fps: FpsState::INITIAL,
+            graph: FrametimeGraph::default(),
             stale_after_ms,
         }
     }
@@ -86,6 +89,11 @@ impl Aggregator {
         self.fps = state;
     }
 
+    /// График строится вместе с состоянием кадров и из тех же кадров, поэтому приходит рядом.
+    pub fn submit_graph(&mut self, graph: FrametimeGraph) {
+        self.graph = graph;
+    }
+
     pub fn snapshot(&self, now_ms: Millis) -> Snapshot {
         let fast = self.fresh(self.load.as_ref(), self.load_at_ms, now_ms);
         let slow = self.fresh(self.slow.as_ref(), self.slow_at_ms, now_ms);
@@ -106,6 +114,7 @@ impl Aggregator {
                 ),
             },
             fps: self.fps.clone(),
+            frametime_graph: self.graph.clone(),
             hardware_status: merge_status(fast.map(|s| s.status), slow.map(|s| s.status)),
             timestamp_ms: now_ms,
         }

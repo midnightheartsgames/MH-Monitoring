@@ -22,6 +22,7 @@
 
 pub mod aggregator;
 pub mod fps_state;
+pub mod graph;
 pub mod ring;
 pub mod session_name;
 pub mod statistics;
@@ -36,6 +37,7 @@ pub type Millis = u64;
 
 pub use aggregator::{Aggregator, HardwareSample, SampleTier};
 pub use fps_state::{FpsAvailability, FpsReason, FpsState, TargetProcess};
+pub use graph::{FrametimeGraph, GraphBuilder};
 pub use ring::FrametimeRing;
 pub use session_name::{SESSION_PREFIX, session_name, should_sweep};
 pub use statistics::FrameStatistics;

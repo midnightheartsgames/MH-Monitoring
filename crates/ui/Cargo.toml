@@ -1,0 +1,22 @@
+[package]
+name = "mh-ui"
+version.workspace = true
+edition.workspace = true
+description = "MH Monitor: оверлей, трей, хоткеи"
+
+[[bin]]
+name = "mh-monitor"
+path = "src/main.rs"
+
+[dependencies]
+mh-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+mh-engine = { path = "../engine" }
+mh-platform = { path = "../platform" }
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+tray-icon = "0.25"
+global-hotkey = "0.8"
+raw-window-handle = "0.6"

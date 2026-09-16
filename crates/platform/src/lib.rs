@@ -20,6 +20,8 @@ pub mod etw;
 #[cfg(windows)]
 pub mod job;
 #[cfg(windows)]
+pub mod overlay;
+#[cfg(windows)]
 pub mod pawnio;
 #[cfg(windows)]
 pub mod pdh;

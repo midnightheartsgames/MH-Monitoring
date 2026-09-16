@@ -248,6 +248,11 @@ impl EtwFrameSource {
         self.session.name()
     }
 
+    /// Кадры окна на момент последнего [`Self::poll`], старейший первым.
+    pub fn frametimes(&self) -> &[f32] {
+        &self.ordered
+    }
+
     pub fn poll(&mut self, now_ms: Millis) -> EtwReport {
         // Поток чтения вернулся сам — значит сессию кто-то остановил снаружи.
         if self.reader_done.try_recv().is_ok() {

@@ -86,6 +86,10 @@ pub trait FrameSource: Send {
     fn kind(&self) -> SourceKind;
     /// Опрос без блокировки.
     fn poll(&mut self, now_ms: Millis) -> FrameReport;
+    /// Кадры окна на момент последнего [`FrameSource::poll`], старейший первым. Для графика.
+    fn frametimes(&self) -> &[f32] {
+        &[]
+    }
     /// Остановка. Обязана оставить систему без ETW-сессии и без живого дочернего процесса.
     fn stop(&mut self);
 }

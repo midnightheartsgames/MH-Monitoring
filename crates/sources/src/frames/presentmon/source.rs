@@ -79,6 +79,10 @@ impl FrameSource for PresentMonSource {
         SourceKind::PresentMon
     }
 
+    fn frametimes(&self) -> &[f32] {
+        self.session.frametimes()
+    }
+
     fn poll(&mut self, now_ms: Millis) -> FrameReport {
         let report = self.session.poll(now_ms);
         let status = match report.status {

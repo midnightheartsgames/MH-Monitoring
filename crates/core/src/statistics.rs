@@ -19,7 +19,7 @@ pub const MIN_SAMPLES_0_1_PERCENT: usize = 1_000;
 /// разное, и UI обязан их различать.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct FrameStatistics {
-    /// FPS по последнему кадру. Дёргается, поэтому годится для графика, а не для показа числом.
+    /// FPS за последние [`CURRENT_WINDOW_MS`] — число для HUD. Покадровую картину даёт график.
     pub current_fps: Option<f64>,
     pub average_fps: Option<f64>,
     pub low_1_percent_fps: Option<f64>,
@@ -63,13 +63,11 @@ pub fn compute_with_scratch(frametimes_ms: &[f32], scratch: &mut Vec<f32>) -> Fr
     scratch.reserve(frametimes_ms.len());
 
     let mut rejected = 0usize;
-    let mut last_valid: Option<f64> = None;
     for &value in frametimes_ms {
         // NaN отравляет сортировку, ноль и отрицательные дают деление на ноль дальше по цепочке.
         // Отбраковываем на входе, а не посреди расчёта.
         if value.is_finite() && value > 0.0 {
             scratch.push(value);
-            last_valid = Some(value as f64);
         } else {
             rejected += 1;
         }
@@ -79,6 +77,9 @@ pub fn compute_with_scratch(frametimes_ms: &[f32], scratch: &mut Vec<f32>) -> Fr
         return FrameStatistics { rejected_count: rejected, ..FrameStatistics::EMPTY };
     }
 
+    // До сортировки: «текущее» — это самые свежие кадры, а порядок нужен хронологический.
+    let current_frametime = recent_average_ms(scratch);
+
     let count = scratch.len();
     let total_ms: f64 = scratch.iter().map(|&v| v as f64).sum();
     let average_fps = if total_ms > 0.0 { Some(count as f64 * 1000.0 / total_ms) } else { None };
@@ -87,14 +88,33 @@ pub fn compute_with_scratch(frametimes_ms: &[f32], scratch: &mut Vec<f32>) -> Fr
     scratch.sort_by(|a, b| a.partial_cmp(b).expect("NaN отбракован выше"));
 
     FrameStatistics {
-        current_fps: last_valid.map(|ms| 1000.0 / ms),
+        current_fps: Some(1000.0 / current_frametime),
         average_fps,
         low_1_percent_fps: low_fps(scratch, 0.01, MIN_SAMPLES_1_PERCENT),
         low_0_1_percent_fps: low_fps(scratch, 0.001, MIN_SAMPLES_0_1_PERCENT),
-        current_frametime_ms: last_valid,
+        current_frametime_ms: Some(current_frametime),
         sample_count: count,
         rejected_count: rejected,
     }
+}
+
+/// Окно «текущего» значения. По одному последнему кадру число в HUD скакало у Dota 2 от 63 до
+/// 390 за секунду (PLAN.md §2.13); покадровую картину показывает график.
+pub const CURRENT_WINDOW_MS: f64 = 500.0;
+
+/// Средний frametime последних кадров, покрывающих [`CURRENT_WINDOW_MS`] (хотя бы одного).
+/// `chronological` не пуст и содержит только годные значения.
+fn recent_average_ms(chronological: &[f32]) -> f64 {
+    let mut total = 0.0f64;
+    let mut count = 0usize;
+    for &value in chronological.iter().rev() {
+        total += f64::from(value);
+        count += 1;
+        if total >= CURRENT_WINDOW_MS {
+            break;
+        }
+    }
+    total / count as f64
 }
 
 /// `sorted` — по возрастанию, поэтому самые медленные кадры лежат в хвосте.
@@ -126,10 +146,27 @@ mod tests {
     }
 
     #[test]
-    fn current_values_come_from_the_last_frame() {
-        let stats = compute(&[10.0, 10.0, 20.0]);
+    fn current_values_come_from_the_last_half_second() {
+        // Секунда по 10 мс, потом полсекунды по 20 мс: «текущее» — только последние полсекунды.
+        let mut frames = vec![10.0; 100];
+        frames.extend(vec![20.0; 25]);
+        let stats = compute(&frames);
         assert_eq!(stats.current_frametime_ms, Some(20.0));
         assert!((stats.current_fps.unwrap() - 50.0).abs() < 1e-9);
+    }
+
+    /// Живой случай Dota 2: чередование быстрых и медленных кадров не должно дёргать число.
+    #[test]
+    fn alternating_frames_give_a_steady_current_value() {
+        let frames: Vec<f32> = (0..200).map(|i| if i % 2 == 0 { 3.0 } else { 13.0 }).collect();
+        let current = compute(&frames).current_fps.unwrap();
+        assert!((current - 125.0).abs() < 2.0, "{current}");
+    }
+
+    #[test]
+    fn a_short_history_uses_what_there_is() {
+        let stats = compute(&[10.0, 30.0]);
+        assert_eq!(stats.current_frametime_ms, Some(20.0));
     }
 
     #[test]

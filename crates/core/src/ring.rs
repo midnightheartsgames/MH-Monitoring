@@ -148,6 +148,8 @@ impl FrametimeRing {
     ) -> FrameStatistics {
         self.expire(now_ms);
         if self.len == 0 {
+            // `ordered` читают и после вызова — график; кадров прошлого окна там быть не должно.
+            ordered.clear();
             return FrameStatistics::EMPTY;
         }
         self.copy_ordered_into(ordered);

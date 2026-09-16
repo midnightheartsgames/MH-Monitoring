@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/platform", "crates/sources"]
+members = ["crates/core", "crates/engine", "crates/platform", "crates/sources", "crates/ui"]
 # Спайки — отдельные одноразовые крейты со своими зависимостями и своим Cargo.lock.
 # В рабочее пространство они не входят намеренно: `present-probe` тянет тяжёлый крейт
 # `windows`, который продукту не нужен.

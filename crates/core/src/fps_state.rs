@@ -96,6 +96,8 @@ pub enum FpsReason {
     FramesStalled,
     SessionEnded,
     BackendFailed,
+    /// PresentMon не отслеживает этот режим вывода и недосчитывает кадры.
+    PresentModeUntracked,
 }
 
 impl FpsReason {
@@ -117,7 +119,20 @@ impl FpsReason {
             FpsReason::FramesStalled => "кадры прекратились",
             FpsReason::SessionEnded => "захват завершён",
             FpsReason::BackendFailed => "PresentMon остановился",
+            FpsReason::PresentModeUntracked => "PresentMon не видит кадры при выводе через GDI",
         }
+    }
+}
+
+impl FpsReason {
+    /// Причина сама говорит пользователю, что делать. Сырые слова источника («failed to start
+    /// trace session: access denied») тут только мешают — они остаются в [`FpsState::detail`]
+    /// для диагностики, а HUD показывает инструкцию.
+    pub fn speaks_for_itself(self) -> bool {
+        matches!(
+            self,
+            FpsReason::NotPermitted | FpsReason::ExecutableMissing | FpsReason::SessionConflict
+        )
     }
 }
 
@@ -155,7 +170,13 @@ impl FpsState {
     };
 
     /// Одна короткая строка для HUD, либо ничего, если сказать нечего.
+    ///
+    /// Обычно слова источника важнее кода: они объясняют, что именно сломалось. Исключение —
+    /// причины, которые сами являются инструкцией ([`FpsReason::speaks_for_itself`]).
     pub fn message(&self) -> Option<&str> {
+        if let Some(reason) = self.reason.filter(|reason| reason.speaks_for_itself()) {
+            return Some(reason.message());
+        }
         self.detail.as_deref().or_else(|| self.reason.map(FpsReason::message))
     }
 
@@ -215,11 +236,24 @@ mod tests {
     #[test]
     fn detail_wins_over_the_reason_code() {
         let state = FpsState {
-            reason: Some(FpsReason::NotPermitted),
-            detail: Some("error: access denied".to_string()),
+            reason: Some(FpsReason::BackendFailed),
+            detail: Some("error: the parameter is incorrect".to_string()),
             ..FpsState::INITIAL
         };
-        assert_eq!(state.message(), Some("error: access denied"));
+        assert_eq!(state.message(), Some("error: the parameter is incorrect"));
+    }
+
+    /// Живой случай P4: без прав HUD показывал «failed to start trace session: access denied»
+    /// вместо того, что делать.
+    #[test]
+    fn an_instruction_wins_over_raw_source_words() {
+        let state = FpsState {
+            reason: Some(FpsReason::NotPermitted),
+            detail: Some("failed to start trace session: access denied.".to_string()),
+            ..FpsState::INITIAL
+        };
+        assert_eq!(state.message(), Some("нужны права администратора"));
+        assert!(state.detail.is_some(), "подробность сохраняется для диагностики");
     }
 
     #[test]

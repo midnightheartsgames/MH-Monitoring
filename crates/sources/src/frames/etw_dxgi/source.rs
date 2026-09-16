@@ -56,6 +56,10 @@ impl FrameSource for EtwSource {
         SourceKind::OwnEtw
     }
 
+    fn frametimes(&self) -> &[f32] {
+        self.inner.frametimes()
+    }
+
     fn poll(&mut self, now_ms: Millis) -> FrameReport {
         let report = self.inner.poll(now_ms);
         let status = match report.status {

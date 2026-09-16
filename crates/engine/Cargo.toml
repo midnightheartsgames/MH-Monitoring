@@ -1,0 +1,13 @@
+[package]
+name = "mh-engine"
+version.workspace = true
+edition.workspace = true
+description = "Движок MH Monitor: владеет опросом источников и публикует Snapshot"
+
+[dependencies]
+mh-core = { path = "../core" }
+
+# Движок — это потоки опроса над Windows-источниками. На других платформах крейт пустой.
+[target.'cfg(windows)'.dependencies]
+mh-platform = { path = "../platform" }
+mh-sources = { path = "../sources" }

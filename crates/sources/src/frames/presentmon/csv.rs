@@ -130,6 +130,7 @@ const PRESENTED_PRIORITY: [FrameTimeMetric; 2] =
 const PROCESS_ID_NAMES: &[&str] = &["processid", "pid"];
 const APPLICATION_NAMES: &[&str] = &["application", "processname", "process"];
 const SWAP_CHAIN_NAMES: &[&str] = &["swapchainaddress", "swapchain"];
+const PRESENT_MODE_NAMES: &[&str] = &["presentmode"];
 const SOURCE_TIME_NAMES: &[&str] = &["cpustarttime", "timeinseconds", "timeinms"];
 
 /// Колонки одного поколения CSV, разобранные из заголовка **один раз**.
@@ -144,6 +145,7 @@ pub struct Schema {
     pub application_column: Option<usize>,
     pub swap_chain_column: Option<usize>,
     pub source_time_column: Option<usize>,
+    pub present_mode_column: Option<usize>,
     pub column_count: usize,
 }
 
@@ -184,6 +186,7 @@ impl Schema {
             application_column: index_of(APPLICATION_NAMES),
             swap_chain_column: index_of(SWAP_CHAIN_NAMES),
             source_time_column: index_of(SOURCE_TIME_NAMES),
+            present_mode_column: index_of(PRESENT_MODE_NAMES),
             column_count: names.len(),
         })
     }
@@ -230,6 +233,17 @@ pub struct ParsedFrame<'a> {
     /// Собственная метка времени PresentMon, в единицах выбранных флагов. Может отсутствовать.
     pub source_time: Option<f64>,
     pub swap_chain: Option<&'a str>,
+    /// «Composed: Flip», «Hardware: Independent Flip» и т. п.
+    pub present_mode: Option<&'a str>,
+}
+
+/// Режимы, в которых PresentMon 2.5.1 теряет кадры.
+///
+/// Живой случай: DMC4 SE (DX10) в окне выводит через `Composed: Copy with GPU GDI` — игра и
+/// собственный ETW видят 180 FPS, PresentMon — от 2 до 25 (PLAN.md §2.16).
+pub fn is_untracked_present_mode(mode: &str) -> bool {
+    let mode = mode.to_ascii_lowercase();
+    mode.contains("copy with gpu gdi") || mode.contains("copy with cpu gdi")
 }
 
 /// Разбирает строку по схеме.
@@ -245,6 +259,7 @@ pub fn parse_row<'a>(
     let mut process_id: Option<u32> = None;
     let mut source_time: Option<f64> = None;
     let mut swap_chain: Option<&str> = None;
+    let mut present_mode: Option<&str> = None;
 
     for (column, cell) in cells(line).enumerate() {
         if column == schema.frame_time_column {
@@ -267,13 +282,15 @@ pub fn parse_row<'a>(
             }
         } else if Some(column) == schema.swap_chain_column {
             swap_chain = Some(cell);
+        } else if Some(column) == schema.present_mode_column {
+            present_mode = Some(cell);
         } else if Some(column) == schema.source_time_column {
             source_time = cell.parse().ok();
         }
     }
 
     let frame_time_ms = frame_time_ms.ok_or(RowRejection::TooShort)?;
-    Ok(ParsedFrame { frame_time_ms, process_id, source_time, swap_chain })
+    Ok(ParsedFrame { frame_time_ms, process_id, source_time, swap_chain, present_mode })
 }
 
 #[cfg(test)]
@@ -446,6 +463,23 @@ AnimationTime,MsFlipDelay,MsAllInputToPhotonLatency,MsClickToPhotonLatency";
         let schema = Schema::parse("Application,MsBetweenPresents", false).unwrap();
         let frame = parse_row(&schema, "game.exe,16.7", Some(4242)).expect("строка принята");
         assert_eq!(frame.process_id, None);
+    }
+
+    #[test]
+    fn the_present_mode_is_read_with_its_inner_space() {
+        let schema = Schema::parse(HEADER_2_5_1, false).unwrap();
+        let frame = parse_row(&schema, ROW_2_5_1, None).unwrap();
+        assert_eq!(frame.present_mode, Some("Composed: Flip"));
+        assert!(!is_untracked_present_mode("Composed: Flip"));
+    }
+
+    #[test]
+    fn gdi_copy_modes_are_untracked() {
+        assert!(is_untracked_present_mode("Composed: Copy with GPU GDI"));
+        assert!(is_untracked_present_mode("Composed: Copy with CPU GDI"));
+        assert!(!is_untracked_present_mode("Hardware Composed: Independent Flip"));
+        assert!(!is_untracked_present_mode("Hardware: Legacy Copy to front buffer"));
+        assert!(!is_untracked_present_mode("Other"));
     }
 
     #[test]

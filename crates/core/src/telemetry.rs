@@ -6,6 +6,7 @@
 
 use crate::Millis;
 use crate::fps_state::FpsState;
+use crate::graph::FrametimeGraph;
 
 /// Здоровье источника данных. Источник, который деградировал, не должен ронять приложение.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -203,6 +204,8 @@ pub struct Snapshot {
     pub memory: MemoryStats,
     /// Доступность, причина, цель и статистика одним куском: они не могут разойтись.
     pub fps: FpsState,
+    /// Готовый к рисованию график. Заполняет движок: агрегатор о кадрах по одному не знает.
+    pub frametime_graph: FrametimeGraph,
     pub hardware_status: SensorStatus,
     pub timestamp_ms: Millis,
 }

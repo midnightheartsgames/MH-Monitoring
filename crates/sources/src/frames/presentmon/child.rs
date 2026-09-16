@@ -56,12 +56,23 @@ impl std::fmt::Debug for ProcessLauncher {
 
 impl CaptureLauncher for ProcessLauncher {
     fn launch(&self, command: &CaptureCommand) -> io::Result<Box<dyn CaptureChild>> {
-        let child = Command::new(&command.executable)
+        let mut builder = Command::new(&command.executable);
+        builder
             .args(&command.arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        // PresentMon — консольная программа. У оконного приложения консоли нет, и без этого флага
+        // Windows открывает ей новое окно консоли. Окно забирает фокус, трекер уводит цель на него,
+        // захват перезапускается, и так по кругу: в P4 окно мигало каждые несколько секунд, а игра
+        // теряла фокус и проседала до 3 FPS.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            builder.creation_flags(CREATE_NO_WINDOW);
+        }
+        let child = builder.spawn()?;
         if let Some(hook) = &self.on_spawn {
             hook(child.id());
         }

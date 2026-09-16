@@ -62,6 +62,11 @@ impl FrameCapture {
         self.last_diagnostics.as_deref()
     }
 
+    /// Кадры текущего источника на момент последнего опроса. Пусто, если источника нет.
+    pub fn frametimes(&self) -> &[f32] {
+        self.active.as_ref().map(|source| source.frametimes()).unwrap_or(&[])
+    }
+
     /// Источник, который работает прямо сейчас.
     pub fn active_kind(&self) -> Option<SourceKind> {
         self.active.as_ref().map(|source| source.kind())
@@ -264,6 +269,7 @@ fn reason_allows_fallback(reason: FpsReason) -> bool {
             | FpsReason::BackendFailed
             | FpsReason::SessionConflict
             | FpsReason::NoFrames
+            | FpsReason::PresentModeUntracked
     )
 }
 

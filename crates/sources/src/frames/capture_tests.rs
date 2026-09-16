@@ -218,6 +218,22 @@ fn an_unsupported_csv_switches_to_the_fallback() {
     assert!(state.detail.unwrap().contains(FpsReason::UnsupportedCsv.message()));
 }
 
+/// DMC4 в окне: PresentMon видит 2–25 FPS из 180 — такой счёт хуже отсутствующего (§2.16).
+#[test]
+fn an_untracked_present_mode_switches_to_the_fallback() {
+    let mut rig = rig();
+    rig.primary.set_status(FrameStatus::Failed(Failure::with_detail(
+        FpsReason::PresentModeUntracked,
+        "режим вывода «Composed: Copy with GPU GDI»",
+    )));
+    rig.capture.set_target(Some(&game(4242, 1)));
+
+    let state = rig.capture.poll(0);
+    assert_eq!(rig.capture.active_kind(), Some(SourceKind::OwnEtw));
+    assert!(state.is_delivering());
+    assert!(state.message().unwrap().contains(FpsReason::PresentModeUntracked.message()));
+}
+
 #[test]
 fn a_primary_that_cannot_start_switches_to_the_fallback() {
     let mut rig = rig();

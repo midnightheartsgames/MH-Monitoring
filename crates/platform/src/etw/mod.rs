@@ -15,4 +15,4 @@ pub mod session;
 
 pub use consumer::{Consumer, EventInfo, EventSink, ProcessStatus};
 pub use hygiene::{Sweep, stop_by_name, sweep_orphans};
-pub use session::{Provider, Session, StartError, TraceStats};
+pub use session::{Provider, Session, StartError, TraceStats, install_panic_cleanup};

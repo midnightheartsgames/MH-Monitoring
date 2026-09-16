@@ -291,3 +291,78 @@ fn a_terminal_status_is_sticky() {
     assert_eq!(session.poll(100_000).status, first);
     session.stop();
 }
+
+// --- режим вывода, который PresentMon не отслеживает (§2.16) ------------------------------
+
+const MODE_HEADER: &str = "Application,ProcessID,SwapChainAddress,PresentMode,MsBetweenPresents";
+
+fn rows_with_mode(count: usize, mode: &str) -> String {
+    let mut text = format!("{MODE_HEADER}\n");
+    for _ in 0..count {
+        text.push_str(&format!("dmc4.exe,4242,0xAAAA,{mode},16.0\n"));
+    }
+    text
+}
+
+#[test]
+fn a_gdi_copy_stream_fails_with_its_own_reason() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let launcher =
+        FakeLauncher::new(Script::stdout_text(&rows_with_mode(40, "Composed: Copy with GPU GDI")));
+    let mut session = start(&launcher, clock);
+
+    let report = wait_until(&mut session, 1_000, |r| r.status.is_terminal());
+    match report.status {
+        SessionStatus::Failed(failure) => {
+            assert_eq!(failure.reason, FpsReason::PresentModeUntracked);
+            assert!(failure.detail.unwrap().contains("Copy with GPU GDI"));
+        }
+        other => panic!("ожидался отказ, получено {other:?}"),
+    }
+}
+
+#[test]
+fn a_flip_stream_keeps_measuring() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let launcher = FakeLauncher::new(Script::stdout_text(&rows_with_mode(
+        40,
+        "Hardware Composed: Independent Flip",
+    )));
+    let mut session = start(&launcher, clock);
+    let report = wait_until(&mut session, 1_000, |r| r.counters.parsed >= 40);
+    assert_eq!(report.status, SessionStatus::Measuring);
+    session.stop();
+}
+
+#[test]
+fn recent_modes_need_a_warm_up_and_a_clear_majority() {
+    let mut modes = RecentModes::default();
+    for _ in 0..7 {
+        modes.record(Some("Composed: Copy with GPU GDI"));
+    }
+    assert_eq!(modes.dominant_untracked(), None, "семи кадров мало для решения");
+    modes.record(Some("Composed: Copy with GPU GDI"));
+    assert_eq!(modes.dominant_untracked(), Some("Composed: Copy with GPU GDI"));
+
+    // Переход на полный экран: свежие кадры — Independent Flip, старые вытесняются.
+    for _ in 0..32 {
+        modes.record(Some("Hardware Composed: Independent Flip"));
+    }
+    assert_eq!(modes.dominant_untracked(), None);
+
+    // Половина на половину — не повод бросать основной источник.
+    for index in 0..32 {
+        let mode = if index % 2 == 0 { "Composed: Copy with GPU GDI" } else { "Composed: Flip" };
+        modes.record(Some(mode));
+    }
+    assert_eq!(modes.dominant_untracked(), None);
+}
+
+#[test]
+fn rows_without_a_mode_column_never_trigger() {
+    let mut modes = RecentModes::default();
+    for _ in 0..40 {
+        modes.record(None);
+    }
+    assert_eq!(modes.dominant_untracked(), None);
+}
