@@ -1,0 +1,13 @@
+[package]
+name = "mh-sources"
+version.workspace = true
+edition.workspace = true
+description = "Источники данных MH Monitor: кадры (PresentMon, собственный ETW), железо"
+
+[dependencies]
+mh-core = { path = "../core" }
+
+# Собственный ETW-потребитель живёт только под Windows; на других платформах крейт собирается
+# без него, и чистые части (разбор CSV, payload, политика) остаются проверяемыми везде.
+[target.'cfg(windows)'.dependencies]
+mh-platform = { path = "../platform" }
