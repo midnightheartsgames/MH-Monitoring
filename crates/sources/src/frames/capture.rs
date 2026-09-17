@@ -256,6 +256,8 @@ impl FrameCapture {
             session_id: self.session_id,
             last_frame_at_ms: report.last_frame_at_ms,
             presentation: report.presentation,
+            // Задержка устаревает вместе с кадрами: показывается, только пока они идут.
+            latency_ms: report.latency_ms.filter(|_| measuring),
         }
     }
 

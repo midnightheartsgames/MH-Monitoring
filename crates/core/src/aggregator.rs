@@ -112,6 +112,9 @@ impl Aggregator {
                     slow.and_then(|s| s.memory.total_bytes),
                     fast.and_then(|s| s.memory.total_bytes),
                 ),
+                speed_mhz: slow.and_then(|s| s.memory.speed_mhz),
+                // Только медленный тир: пустота быстрого значит «не мерил», а не «цели нет».
+                process_bytes: slow.and_then(|s| s.memory.process_bytes),
             },
             fps: self.fps.clone(),
             frametime_graph: self.graph.clone(),
@@ -169,6 +172,7 @@ fn merge_gpu(fast: Option<&GpuStats>, slow: Option<&GpuStats>) -> GpuStats {
         ),
         power_watts: pick(slow.and_then(|s| s.power_watts), fast.and_then(|s| s.power_watts)),
         fan_rpm: pick(slow.and_then(|s| s.fan_rpm), fast.and_then(|s| s.fan_rpm)),
+        fan_percent: pick(slow.and_then(|s| s.fan_percent), fast.and_then(|s| s.fan_percent)),
     }
 }
 
@@ -180,6 +184,14 @@ fn merge_cpu(fast: Option<&CpuStats>, slow: Option<&CpuStats>) -> CpuStats {
         temperature_c: pick(slow.and_then(|s| s.temperature_c), fast.and_then(|s| s.temperature_c)),
         clock_mhz: pick(fast.and_then(|s| s.clock_mhz), slow.and_then(|s| s.clock_mhz)),
         power_watts: pick(slow.and_then(|s| s.power_watts), fast.and_then(|s| s.power_watts)),
+        // Ядра — поле частого тира; пустой список значит «не мерил», а не «ядер нет».
+        cores: [fast, slow]
+            .into_iter()
+            .flatten()
+            .map(|s| &s.cores)
+            .find(|cores| !cores.is_empty())
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -231,6 +243,7 @@ mod tests {
             memory: MemoryStats {
                 used_bytes: Some(16_000),
                 total_bytes: Some(32_000),
+                process_bytes: Some(4_000),
                 ..Default::default()
             },
             status: SensorStatus::Available,
@@ -249,6 +262,7 @@ mod tests {
         assert_eq!(snapshot.gpu.name.as_deref(), Some("RTX 5070 Ti"));
         assert_eq!(snapshot.cpu.clock_mhz, Some(4200.0));
         assert_eq!(snapshot.memory.load_percent(), Some(50.0));
+        assert_eq!(snapshot.memory.process_bytes, Some(4_000), "память цели — от медленного");
     }
 
     /// То, ради чего у полей есть владеющий тир: частый замер не знает температуры, и он не

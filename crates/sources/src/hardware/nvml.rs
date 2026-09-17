@@ -11,6 +11,8 @@ use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
 
+use super::gpu_counters::same_gpu_name;
+
 pub struct NvmlSensor {
     nvml: Nvml,
     index: u32,
@@ -18,22 +20,26 @@ pub struct NvmlSensor {
 }
 
 impl NvmlSensor {
-    pub fn open() -> Result<Self, SensorReason> {
+    /// `wanted` — имя выбранной карты. Карты NVIDIA с таким именем нет — ошибка: выбранную,
+    /// возможно, читает ядро графики.
+    pub fn open(wanted: Option<&str>) -> Result<Self, SensorReason> {
         let nvml = Nvml::init().map_err(|error| init_reason(&error))?;
         let count = nvml.device_count().map_err(|_| SensorReason::GpuQueryFailed)?;
 
-        // Из нескольких карт — та, у которой больше памяти: в игровой машине это и есть основная.
-        let index = (0..count)
+        let cards: Vec<(u32, String, u64)> = (0..count)
             .filter_map(|index| {
-                let memory = nvml.device_by_index(index).ok()?.memory_info().ok()?;
-                Some((index, memory.total))
+                let device = nvml.device_by_index(index).ok()?;
+                let total = device.memory_info().ok()?.total;
+                Some((index, device.name().unwrap_or_default(), total))
             })
-            .max_by_key(|&(_, total)| total)
-            .map(|(index, _)| index)
-            .ok_or(SensorReason::NoSupportedGpu)?;
-
-        let name = nvml.device_by_index(index).ok().and_then(|device| device.name().ok());
-        Ok(Self { nvml, index, name })
+            .collect();
+        let chosen = match wanted {
+            Some(wanted) => cards.iter().find(|(_, name, _)| same_gpu_name(name, wanted)),
+            // Из нескольких карт — та, у которой больше памяти: в игровой машине это основная.
+            None => cards.iter().max_by_key(|(_, _, total)| *total),
+        };
+        let (index, name, _) = chosen.cloned().ok_or(SensorReason::NoSupportedGpu)?;
+        Ok(Self { nvml, index, name: Some(name).filter(|name| !name.is_empty()) })
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -68,6 +74,7 @@ impl NvmlSensor {
         let power_watts = health.take(device.power_usage()).map(|mw| f64::from(mw) / 1_000.0);
         let memory = health.take(device.memory_info());
         let fan_rpm = health.take(device.fan_speed_rpm(0)).map(f64::from);
+        let fan_percent = health.take(device.fan_speed(0)).map(f64::from);
         GpuStats {
             health: health.finish(),
             name: self.name.clone(),
@@ -76,6 +83,7 @@ impl NvmlSensor {
             vram_used_bytes: memory.as_ref().map(|memory| memory.used),
             vram_total_bytes: memory.map(|memory| memory.total),
             fan_rpm,
+            fan_percent,
             ..Default::default()
         }
     }
@@ -180,7 +188,7 @@ mod tests {
     /// видеопамять и питание, и мы обязаны показать то же. На машине без NVIDIA — внятная причина.
     #[test]
     fn this_machine_either_reads_or_explains() {
-        match NvmlSensor::open() {
+        match NvmlSensor::open(None) {
             Ok(sensor) => {
                 let load = sensor.read_load();
                 let slow = sensor.read_slow();

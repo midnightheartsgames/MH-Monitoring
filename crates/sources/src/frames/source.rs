@@ -81,6 +81,8 @@ pub struct FrameReport {
     pub diagnostics: String,
     /// Рантайм и режим вывода последних кадров, если источник их знает.
     pub presentation: Option<String>,
+    /// Средняя задержка вывода, если источник её знает.
+    pub latency_ms: Option<f64>,
 }
 
 /// Живой сеанс захвата кадров одного процесса.

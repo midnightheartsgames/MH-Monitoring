@@ -75,6 +75,8 @@ impl FrameSource for EtwSource {
             statistics: report.statistics,
             last_frame_at_ms: report.last_frame_at_ms,
             presentation: None,
+            // Задержку собственный потребитель не считает: ему не видно, когда кадр на экране.
+            latency_ms: None,
             diagnostics: format!(
                 "Present {}, кадров {}, тестовых {}, помеченных-кадров {}, чужих цепочек {}, \
                  битых {}, потеряно событий {}; ядро: вызовов {}, кадров {}",

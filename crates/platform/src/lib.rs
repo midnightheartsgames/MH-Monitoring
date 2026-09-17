@@ -49,6 +49,8 @@ pub mod registry;
 pub mod shortcut;
 #[cfg(windows)]
 mod sys;
+#[cfg(windows)]
+pub mod system_info;
 
 /// Частота `QueryPerformanceCounter`.
 ///

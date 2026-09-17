@@ -7,11 +7,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use mh_core::{
-    Aggregator, FpsReason, GraphBuilder, Millis, SampleTier, Snapshot, TargetResolution,
-    session_name,
+    Aggregator, FpsReason, GraphBuilder, Millis, SampleTier, SensorOptions, Snapshot,
+    TargetResolution, session_name,
 };
 use mh_platform::etw::{install_panic_cleanup, stop_by_name, sweep_orphans};
 use mh_platform::job::KillOnCloseJob;
+use mh_platform::process::process_memory;
 use mh_sources::clock::{Clock, MonotonicClock};
 use mh_sources::frames::capture::FrameCapture;
 use mh_sources::frames::etw_dxgi::source::EtwFactory;
@@ -21,9 +22,8 @@ use mh_sources::frames::presentmon::source::PresentMonFactory;
 use mh_sources::frames::source::FrameSourceFactory;
 use mh_sources::hardware::sampler::HardwareSampler;
 
-/// Частоты опроса — те же, что отлажены в старом проекте (`PollingConfig.kt`).
-const LOAD_INTERVAL_MS: Millis = 500;
-const SLOW_INTERVAL_MS: Millis = 1_000;
+/// Частота опроса кадров постоянна; железо опрашивается так, как задал пользователь
+/// ([`SensorOptions`]).
 const FRAMES_INTERVAL_MS: Millis = 250;
 
 pub struct EngineConfig {
@@ -40,6 +40,8 @@ struct Shared {
     /// Кого мерить. Решает не движок: в службе нет окна в фокусе (сессия 0), поэтому цель
     /// выбирает UI — через [`crate::TargetWatcher`] — и присылает готовой.
     target: Mutex<TargetResolution>,
+    /// Как часто опрашивать железо. Меняется на ходу: поток читает его на каждом шаге.
+    sensors: Mutex<SensorOptions>,
     stop: AtomicBool,
     clock: Arc<dyn Clock>,
     notify: Notify,
@@ -84,6 +86,7 @@ impl Engine {
         let shared = Arc::new(Shared {
             aggregator: Mutex::new(Aggregator::new()),
             target: Mutex::new(no_target()),
+            sensors: Mutex::new(SensorOptions::default()),
             stop: AtomicBool::new(false),
             clock: MonotonicClock::shared(),
             notify: Arc::new(notify),
@@ -116,6 +119,11 @@ impl Engine {
     pub fn set_target(&self, target: TargetResolution) {
         *self.shared.target.lock().unwrap_or_else(|e| e.into_inner()) = target;
     }
+
+    /// Новый интервал действует со следующего шага опроса.
+    pub fn set_sensor_options(&self, options: SensorOptions) {
+        *self.shared.sensors.lock().unwrap_or_else(|e| e.into_inner()) = options.sanitized();
+    }
 }
 
 impl Drop for Engine {
@@ -135,19 +143,29 @@ fn hardware_loop(shared: &Shared) {
     let mut next_slow = 0;
     loop {
         let started = shared.clock.now_ms();
+        let options = shared.sensors.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        sampler.select_gpu(options.gpu.as_deref());
+        let interval = options.interval();
         let load = sampler.sample(SampleTier::Load, started);
         shared.aggregator().submit_hardware(SampleTier::Load, load, started);
         if started >= next_slow {
-            let slow = sampler.sample(SampleTier::Slow, started);
+            let mut slow = sampler.sample(SampleTier::Slow, started);
+            slow.memory.process_bytes = target_memory(shared);
             shared.aggregator().submit_hardware(SampleTier::Slow, slow, started);
-            next_slow = started + SLOW_INTERVAL_MS;
+            next_slow = started + interval.slow_ms;
         }
         (shared.notify)();
-        shared.sleep_until(started + LOAD_INTERVAL_MS);
+        shared.sleep_until(started + interval.load_ms);
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
     }
+}
+
+/// Память процесса, который сейчас меряется. Цель выбирает UI, движок только читает её.
+fn target_memory(shared: &Shared) -> Option<u64> {
+    let target = shared.target.lock().unwrap_or_else(|e| e.into_inner()).target().cloned()?;
+    process_memory(&target)
 }
 
 fn frames_loop(shared: &Shared, mut capture: FrameCapture) {

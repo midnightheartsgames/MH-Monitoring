@@ -81,6 +81,7 @@ fn main() {
                 value(s.gpu.fan_rpm, |v| format!("{v:.0} об/мин")),
                 health(s.gpu.health),
             );
+            println!("  GPU вент.: {}", value(s.gpu.fan_percent, |v| format!("{v:.0} %")));
             println!(
                 "  CPU: {} | {} | {} | {}{}",
                 value(s.cpu.load_percent, |v| format!("{v:.0} %")),
@@ -89,6 +90,27 @@ fn main() {
                 value(s.cpu.power_watts, |v| format!("{v:.1} Вт")),
                 health(s.cpu.health),
             );
+            let cores: Vec<String> = s
+                .cpu
+                .cores
+                .iter()
+                .map(|core| {
+                    format!(
+                        "{}:{}/{}",
+                        core.efficiency_class,
+                        value(core.load_percent, |v| format!("{v:.0}")),
+                        value(core.clock_mhz, |v| format!("{v:.0}"))
+                    )
+                })
+                .collect();
+            println!("  ядра (класс:загрузка/МГц): {}", cores.join(" "));
+            if let Some(hybrid) = s.cpu.hybrid_clocks() {
+                println!(
+                    "  P {} | E {}",
+                    value(hybrid.performance_mhz, |v| format!("{v:.0} МГц")),
+                    value(hybrid.efficient_mhz, |v| format!("{v:.0} МГц"))
+                );
+            }
             println!(
                 "  RAM: {} / {} ({}){}",
                 value(s.memory.used_bytes, |v| format!("{:.1}", v as f64 / GIB)),
@@ -96,6 +118,7 @@ fn main() {
                 value(s.memory.load_percent(), |v| format!("{v:.0} %")),
                 health(s.memory.health),
             );
+            println!("  RAM частота: {}", value(s.memory.speed_mhz, |v| format!("{v} МГц")));
         }
         tick += 1;
         std::thread::sleep(Duration::from_millis(500));

@@ -133,6 +133,10 @@ const SWAP_CHAIN_NAMES: &[&str] = &["swapchainaddress", "swapchain"];
 const PRESENT_MODE_NAMES: &[&str] = &["presentmode"];
 const PRESENT_RUNTIME_NAMES: &[&str] = &["presentruntime", "runtime"];
 const SOURCE_TIME_NAMES: &[&str] = &["cpustarttime", "timeinseconds", "timeinms"];
+// Колонки задержки вывода — только у PresentMon 2.x ([`mh_core::latency`]).
+const CPU_START_NAMES: &[&str] = &["cpustarttimeinms"];
+const PRESENT_START_NAMES: &[&str] = &["timeinms"];
+const UNTIL_DISPLAYED_NAMES: &[&str] = &["msuntildisplayed"];
 
 /// Колонки одного поколения CSV, разобранные из заголовка **один раз**.
 ///
@@ -148,7 +152,16 @@ pub struct Schema {
     pub source_time_column: Option<usize>,
     pub present_mode_column: Option<usize>,
     pub present_runtime_column: Option<usize>,
+    /// Колонки задержки вывода; нужны все три.
+    pub latency_columns: Option<LatencyColumns>,
     pub column_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencyColumns {
+    pub cpu_start: usize,
+    pub present_start: usize,
+    pub until_displayed: usize,
 }
 
 impl Schema {
@@ -190,6 +203,17 @@ impl Schema {
             source_time_column: index_of(SOURCE_TIME_NAMES),
             present_mode_column: index_of(PRESENT_MODE_NAMES),
             present_runtime_column: index_of(PRESENT_RUNTIME_NAMES),
+            // Без любой из трёх колонок задержки нет, но кадры читаются как обычно.
+            latency_columns: match (
+                index_of(CPU_START_NAMES),
+                index_of(PRESENT_START_NAMES),
+                index_of(UNTIL_DISPLAYED_NAMES),
+            ) {
+                (Some(cpu_start), Some(present_start), Some(until_displayed)) => {
+                    Some(LatencyColumns { cpu_start, present_start, until_displayed })
+                }
+                _ => None,
+            },
             column_count: names.len(),
         })
     }
@@ -240,6 +264,8 @@ pub struct ParsedFrame<'a> {
     pub present_mode: Option<&'a str>,
     /// «DXGI», «D3D9» или «Other» — последнее у OpenGL и Vulkan.
     pub present_runtime: Option<&'a str>,
+    /// Задержка вывода этого кадра; `None` — кадр не показан или колонок нет.
+    pub latency_ms: Option<f64>,
 }
 
 /// Видит ли этот рантайм собственный ETW-потребитель — то есть есть ли куда откатываться.
@@ -277,8 +303,19 @@ pub fn parse_row<'a>(
     let mut swap_chain: Option<&str> = None;
     let mut present_mode: Option<&str> = None;
     let mut present_runtime: Option<&str> = None;
+    let (mut cpu_start, mut present_start, mut until_displayed) = (None, None, None);
+    let latency = schema.latency_columns;
 
     for (column, cell) in cells(line).enumerate() {
+        if let Some(latency) = latency {
+            if column == latency.cpu_start {
+                cpu_start = cell.parse().ok();
+            } else if column == latency.present_start {
+                present_start = cell.parse().ok();
+            } else if column == latency.until_displayed {
+                until_displayed = cell.parse().ok();
+            }
+        }
         if column == schema.frame_time_column {
             if cell.is_empty() {
                 return Err(RowRejection::TooShort);
@@ -316,6 +353,7 @@ pub fn parse_row<'a>(
         swap_chain,
         present_mode,
         present_runtime,
+        latency_ms: mh_core::latency::display_latency_ms(cpu_start, present_start, until_displayed),
     })
 }
 
@@ -375,6 +413,25 @@ AnimationTime,MsFlipDelay,MsAllInputToPhotonLatency,MsClickToPhotonLatency";
     }
 
     // --- схема ---
+
+    #[test]
+    fn latency_is_read_from_a_real_2_5_1_row() {
+        let schema = Schema::parse(HEADER_2_5_1, false).unwrap();
+        assert!(schema.latency_columns.is_some());
+        let frame = parse_row(&schema, ROW_2_5_1, None).unwrap();
+        // 199.8651 − 80.7585 + 5.0455
+        let latency = frame.latency_ms.expect("кадр показан");
+        assert!((latency - 124.1521).abs() < 1e-9, "{latency}");
+    }
+
+    #[test]
+    fn an_older_csv_reads_frames_without_latency() {
+        let schema = Schema::parse("Application,ProcessID,TimeInSeconds,MsBetweenPresents", false)
+            .expect("кадры читаются и без колонок задержки");
+        assert_eq!(schema.latency_columns, None);
+        let frame = parse_row(&schema, "game.exe,42,1.5,16.6", None).unwrap();
+        assert_eq!(frame.latency_ms, None);
+    }
 
     #[test]
     fn header_names_are_normalized_before_matching() {

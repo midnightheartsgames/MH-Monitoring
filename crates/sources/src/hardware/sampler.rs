@@ -23,10 +23,16 @@ enum GpuSensor {
 }
 
 impl GpuSensor {
-    fn open() -> Result<Self, SensorReason> {
-        match NvmlSensor::open() {
+    /// Выбранная карта: сначала среди карт NVIDIA, потом у ядра графики. Выбранной нет вовсе
+    /// (карту вынули) — автовыбор: пустая секция хуже другой карты.
+    fn open(wanted: Option<&str>) -> Result<Self, SensorReason> {
+        let open = |wanted: Option<&str>| match NvmlSensor::open(wanted) {
             Ok(sensor) => Ok(GpuSensor::Nvml(Box::new(sensor))),
-            Err(_) => WddmGpuSensor::open().map(GpuSensor::Wddm),
+            Err(_) => WddmGpuSensor::open(wanted).map(GpuSensor::Wddm),
+        };
+        match wanted {
+            Some(_) => open(wanted).or_else(|_| open(None)),
+            None => open(None),
         }
     }
 
@@ -73,6 +79,8 @@ impl CpuThermalSensor {
 pub struct HardwareSampler {
     system: SystemSensor,
     gpu: Result<GpuSensor, SensorReason>,
+    /// Какую карту просили — чтобы переоткрывать датчик только при смене выбора.
+    wanted_gpu: Option<String>,
     cpu_thermals: Result<CpuThermalSensor, SensorReason>,
 }
 
@@ -84,11 +92,25 @@ impl Default for HardwareSampler {
 
 impl HardwareSampler {
     pub fn open() -> Self {
+        Self::with_gpu(None)
+    }
+
+    pub fn with_gpu(wanted: Option<String>) -> Self {
         Self {
             system: SystemSensor::new(),
-            gpu: GpuSensor::open(),
+            gpu: GpuSensor::open(wanted.as_deref()),
+            wanted_gpu: wanted,
             cpu_thermals: CpuThermalSensor::open().map_err(|error| cpu_reason(&error)),
         }
+    }
+
+    /// Переключает видеокарту. Тот же выбор — ничего не делает: NVML открывается не мгновенно.
+    pub fn select_gpu(&mut self, wanted: Option<&str>) {
+        if self.wanted_gpu.as_deref() == wanted {
+            return;
+        }
+        self.wanted_gpu = wanted.map(str::to_string);
+        self.gpu = GpuSensor::open(wanted);
     }
 
     /// Почему не читаются температура и мощность CPU, если не читаются.

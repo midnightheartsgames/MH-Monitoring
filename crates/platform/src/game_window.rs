@@ -7,16 +7,16 @@
 
 use std::io;
 
-use windows_sys::Win32::Foundation::{HWND, RECT, SetLastError};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, SetLastError};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
-    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
-    WS_EX_DLGMODALFRAME, WS_EX_STATICEDGE, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_SYSMENU, WS_THICKFRAME,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect,
+    GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+    IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME,
+    WS_EX_STATICEDGE, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::sys::from_wide;
@@ -104,6 +104,49 @@ pub fn make_borderless(hwnd: isize) -> io::Result<Borderless> {
 }
 
 /// `SetWindowLongPtrW` возвращает прежнее значение, и 0 — не всегда ошибка.
+/// Размер клиентской области главного окна процесса, в физических пикселях: самое большое
+/// видимое окно верхнего уровня без владельца. Для игры это разрешение, в котором она рисует.
+///
+/// `None` — видимых окон у процесса нет (свёрнута, ещё грузится или это не он рисует).
+pub fn client_size(pid: u32) -> Option<(u32, u32)> {
+    struct Search {
+        pid: u32,
+        best: Option<(u32, u32)>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
+        // SAFETY: `data` — указатель на `Search` из `client_size`, живой на время перечисления.
+        let search = unsafe { &mut *(data as *mut Search) };
+        let mut owner_pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut owner_pid) };
+        let candidate = owner_pid == search.pid
+            && unsafe { IsWindowVisible(hwnd) } != 0
+            && unsafe { GetWindow(hwnd, GW_OWNER) }.is_null();
+        if candidate {
+            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if unsafe { GetClientRect(hwnd, &mut rect) } != 0 {
+                let size = (
+                    (rect.right - rect.left).max(0) as u32,
+                    (rect.bottom - rect.top).max(0) as u32,
+                );
+                let area = |(width, height): (u32, u32)| u64::from(width) * u64::from(height);
+                if size.0 > 0
+                    && size.1 > 0
+                    && search.best.is_none_or(|best| area(size) > area(best))
+                {
+                    search.best = Some(size);
+                }
+            }
+        }
+        1
+    }
+    if pid == 0 {
+        return None;
+    }
+    let mut search = Search { pid, best: None };
+    unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
+    search.best
+}
+
 unsafe fn set_long(hwnd: HWND, index: i32, value: u32) -> io::Result<()> {
     unsafe {
         SetLastError(0);
@@ -155,6 +198,13 @@ mod tests {
     fn a_popup_window_is_already_borderless() {
         let style = WS_POPUP | WS_VISIBLE;
         assert_eq!(borderless_styles(style, 0), (style, 0));
+    }
+
+    #[test]
+    fn a_process_without_windows_has_no_size() {
+        // У тестового процесса окон нет; у несуществующего — тем более.
+        assert_eq!(client_size(std::process::id()), None);
+        assert_eq!(client_size(0), None);
     }
 
     #[test]

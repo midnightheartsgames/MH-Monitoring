@@ -10,6 +10,9 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::ProcessStatus::{
+    K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+};
 use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
@@ -74,6 +77,31 @@ impl ProcessHandle {
         unsafe { WaitForSingleObject(self.0, 0) == WAIT_TIMEOUT }
     }
 
+    /// Частный рабочий набор — то, что диспетчер задач показывает в колонке «Память». Старые
+    /// системы (до 1809) этого поля не заполняют, тогда отдаём весь рабочий набор.
+    fn memory_bytes(&self) -> Option<u64> {
+        let mut counters: PROCESS_MEMORY_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
+        let size = size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
+        counters.cb = size;
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(
+                self.0,
+                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX2)
+                    .cast::<PROCESS_MEMORY_COUNTERS>(),
+                size,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let bytes = if counters.PrivateWorkingSetSize > 0 {
+            counters.PrivateWorkingSetSize
+        } else {
+            counters.WorkingSetSize
+        };
+        (bytes > 0).then_some(bytes as u64)
+    }
+
     fn describe(&self, process_id: u32) -> Option<TargetProcess> {
         Some(TargetProcess::new(process_id, self.image_name()?, self.started_at_ms()))
     }
@@ -126,6 +154,16 @@ pub fn list_processes() -> Vec<(u32, String)> {
         more = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
     }
     result
+}
+
+/// Сколько памяти занимает именно этот запуск процесса. `None`, если процесс завершился, его PID
+/// достался другому или Windows не дала его открыть.
+pub fn process_memory(target: &TargetProcess) -> Option<u64> {
+    let handle = ProcessHandle::open(target.pid)?;
+    if !handle.is_running() || handle.started_at_ms() != target.started_at_ms {
+        return None;
+    }
+    handle.memory_bytes()
 }
 
 /// [`ProcessLookup`] поверх Windows.
@@ -194,6 +232,16 @@ mod tests {
         let mut impostor = own_process();
         impostor.started_at_ms = impostor.started_at_ms.map(|at| at + 1);
         assert!(!SystemProcessLookup.is_same_run_alive(&impostor));
+    }
+
+    #[test]
+    fn the_current_process_reports_its_memory() {
+        let me = own_process();
+        let bytes = process_memory(&me).expect("свою память процесс видит всегда");
+        assert!(bytes > 0);
+        let mut impostor = me;
+        impostor.started_at_ms = impostor.started_at_ms.map(|at| at + 1);
+        assert_eq!(process_memory(&impostor), None, "чужой запуск с тем же PID не считается");
     }
 
     #[test]

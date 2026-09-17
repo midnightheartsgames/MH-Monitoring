@@ -163,6 +163,10 @@ pub struct FpsState {
     /// Как игра выводит кадры, по словам источника: «DXGI · Composed: Flip». Для диагностики:
     /// режим `Hardware: Legacy Flip` идёт мимо композитора, и никакое окно поверх не видно.
     pub presentation: Option<String>,
+    /// Средняя задержка вывода за последнюю секунду ([`crate::latency`]). Её знает только
+    /// PresentMon.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub latency_ms: Option<f64>,
 }
 
 impl FpsState {
@@ -175,7 +179,15 @@ impl FpsState {
         session_id: 0,
         last_frame_at_ms: None,
         presentation: None,
+        latency_ms: None,
     };
+
+    /// Графический API из [`FpsState::presentation`]: «DXGI», «D3D9» или «Other».
+    pub fn api(&self) -> Option<&str> {
+        let presentation = self.presentation.as_deref()?;
+        let api = presentation.split(" · ").next()?.trim();
+        (!api.is_empty() && api != "?").then_some(api)
+    }
 
     /// Одна короткая строка для HUD, либо ничего, если сказать нечего.
     ///
@@ -212,6 +224,17 @@ mod tests {
 
     fn process(pid: u32, started_at_ms: Option<Millis>) -> TargetProcess {
         TargetProcess::new(pid, "hl2.exe", started_at_ms)
+    }
+
+    #[test]
+    fn the_api_is_the_runtime_part_of_the_presentation() {
+        let state = |presentation: Option<&str>| FpsState {
+            presentation: presentation.map(str::to_string),
+            ..FpsState::INITIAL
+        };
+        assert_eq!(state(Some("DXGI · Composed: Flip")).api(), Some("DXGI"));
+        assert_eq!(state(Some("? · Composed: Flip")).api(), None, "рантайм неизвестен");
+        assert_eq!(state(None).api(), None);
     }
 
     #[test]

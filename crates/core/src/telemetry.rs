@@ -144,6 +144,9 @@ pub struct GpuStats {
     pub vram_total_bytes: Option<u64>,
     pub power_watts: Option<f64>,
     pub fan_rpm: Option<f64>,
+    /// Обороты в процентах от максимума — так их сообщает NVML.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fan_percent: Option<f64>,
 }
 
 impl GpuStats {
@@ -155,7 +158,26 @@ impl GpuStats {
             || self.vram_used_bytes.is_some()
             || self.power_watts.is_some()
             || self.fan_rpm.is_some()
+            || self.fan_percent.is_some()
     }
+}
+
+/// Одно логическое ядро процессора.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CoreStats {
+    pub load_percent: Option<f64>,
+    pub clock_mhz: Option<f64>,
+    /// Класс эффективности ядра, как его сообщает Windows: у гибридных процессоров
+    /// производительные ядра имеют класс выше энергоэффективных. У обычных — у всех один.
+    pub efficiency_class: u8,
+}
+
+/// Средние частоты ядер гибридного процессора.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HybridClocks {
+    pub performance_mhz: Option<f64>,
+    pub efficient_mhz: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -168,9 +190,35 @@ pub struct CpuStats {
     pub temperature_c: Option<f64>,
     pub clock_mhz: Option<f64>,
     pub power_watts: Option<f64>,
+    /// Логические ядра по порядку Windows. Пусто — движок их не сообщает.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cores: Vec<CoreStats>,
 }
 
 impl CpuStats {
+    /// Средние частоты P- и E-ядер. `None` — процессор не гибридный или ядер не видно.
+    ///
+    /// P-ядра — старший класс эффективности, E-ядра — младший. Промежуточных классов у
+    /// нынешних процессоров Intel нет; малые ядра Core Ultra (LP-E) Windows относит к тому же
+    /// классу, что и E-ядра, поэтому отдельно не показываются.
+    pub fn hybrid_clocks(&self) -> Option<HybridClocks> {
+        let top = self.cores.iter().map(|core| core.efficiency_class).max()?;
+        let bottom = self.cores.iter().map(|core| core.efficiency_class).min()?;
+        if top == bottom {
+            return None;
+        }
+        let average = |class: u8| {
+            let clocks: Vec<f64> = self
+                .cores
+                .iter()
+                .filter(|core| core.efficiency_class == class)
+                .filter_map(|core| core.clock_mhz)
+                .collect();
+            (!clocks.is_empty()).then(|| clocks.iter().sum::<f64>() / clocks.len() as f64)
+        };
+        Some(HybridClocks { performance_mhz: average(top), efficient_mhz: average(bottom) })
+    }
+
     pub fn has_any_value(&self) -> bool {
         self.load_percent.is_some()
             || self.temperature_c.is_some()
@@ -185,6 +233,13 @@ pub struct MemoryStats {
     pub health: SectionHealth,
     pub used_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
+    /// Рабочая частота памяти по SMBIOS — то, что выставлено в BIOS, а не паспорт модуля.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub speed_mhz: Option<u32>,
+    /// Сколько занимает процесс, который сейчас меряется. `None` — цели нет или её не открыть.
+    /// `default` — чтобы UI понимал снимки службы, собранной до появления поля.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub process_bytes: Option<u64>,
 }
 
 impl MemoryStats {
@@ -244,6 +299,33 @@ mod tests {
         assert!(!SensorStatus::Unknown.is_usable());
         assert!(!SensorStatus::Unavailable.is_usable());
         assert!(!SensorStatus::Error.is_usable());
+    }
+
+    fn core(class: u8, clock: Option<f64>) -> CoreStats {
+        CoreStats { load_percent: None, clock_mhz: clock, efficiency_class: class }
+    }
+
+    #[test]
+    fn hybrid_clocks_average_each_class() {
+        let cpu = CpuStats {
+            cores: vec![
+                core(1, Some(5_000.0)),
+                core(1, Some(5_200.0)),
+                core(0, Some(4_000.0)),
+                core(0, None),
+            ],
+            ..Default::default()
+        };
+        let clocks = cpu.hybrid_clocks().expect("классы разные");
+        assert_eq!(clocks.performance_mhz, Some(5_100.0));
+        assert_eq!(clocks.efficient_mhz, Some(4_000.0));
+    }
+
+    #[test]
+    fn a_uniform_cpu_is_not_hybrid() {
+        let cpu = CpuStats { cores: vec![core(0, Some(4_600.0)); 4], ..Default::default() };
+        assert_eq!(cpu.hybrid_clocks(), None);
+        assert_eq!(CpuStats::default().hybrid_clocks(), None);
     }
 
     #[test]

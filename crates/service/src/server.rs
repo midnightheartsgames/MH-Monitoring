@@ -7,9 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use mh_core::{FpsReason, TargetResolution};
+use mh_core::{FpsReason, SensorOptions, TargetResolution};
 use mh_engine::{Engine, EngineConfig, extract_presentmon};
-use mh_ipc::{PIPE_NAME, PROTOCOL_VERSION, ToClient, ToService, read_message, write_message};
+use mh_ipc::{
+    MIN_PROTOCOL_VERSION, PIPE_NAME, PROTOCOL_VERSION, ToClient, ToService, read_message,
+    write_message,
+};
 use mh_platform::diag;
 use mh_platform::pipe::{PipeListener, PipeStream, SERVICE_PIPE_SDDL};
 
@@ -58,6 +61,7 @@ pub fn run(stop: Arc<AtomicBool>) -> std::io::Result<()> {
             // Последний клиент ушёл — мерить некого: PresentMon не должен работать впустую.
             if clients.fetch_sub(1, Ordering::SeqCst) == 1 {
                 engine.set_target(no_target());
+                engine.set_sensor_options(SensorOptions::default());
             }
         }));
         threads.retain(|thread| !thread.is_finished());
@@ -83,15 +87,16 @@ fn serve_client(mut stream: PipeStream, engine: &Engine, stop: &AtomicBool) {
             Ok(0) => {}
             Ok(_) => match read_message::<ToService>(&mut stream) {
                 Ok(Some(ToService::Hello { protocol, client_pid })) => {
-                    if protocol != PROTOCOL_VERSION {
+                    if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&protocol) {
                         let reason = format!(
-                            "UI говорит на протоколе {protocol}, служба — на {PROTOCOL_VERSION}"
+                            "UI говорит на протоколе {protocol}, служба понимает \
+                             {MIN_PROTOCOL_VERSION}–{PROTOCOL_VERSION}"
                         );
                         diag::log(format!("клиент {client_pid} отклонён: {reason}"));
                         let _ = write_message(&mut stream, &ToClient::Refused { reason });
                         return;
                     }
-                    diag::log(format!("клиент {client_pid} подключён"));
+                    diag::log(format!("клиент {client_pid} подключён, протокол {protocol}"));
                     let hello = ToClient::Hello {
                         protocol: PROTOCOL_VERSION,
                         service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -102,8 +107,13 @@ fn serve_client(mut stream: PipeStream, engine: &Engine, stop: &AtomicBool) {
                     greeted = true;
                 }
                 Ok(Some(ToService::Target(target))) if greeted => engine.set_target(target),
-                // Цель до приветствия — нарушение протокола.
-                Ok(Some(ToService::Target(_))) | Ok(None) | Err(_) => return,
+                Ok(Some(ToService::Sensors(options))) if greeted => {
+                    engine.set_sensor_options(options)
+                }
+                // Что угодно, кроме приветствия, до приветствия — нарушение протокола.
+                Ok(Some(ToService::Target(_) | ToService::Sensors(_))) | Ok(None) | Err(_) => {
+                    return;
+                }
             },
             Err(_) => return,
         }
