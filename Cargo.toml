@@ -7,7 +7,7 @@ members = ["crates/core", "crates/engine", "crates/ipc", "crates/platform", "cra
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 # Крейты не публикуются: дистрибутив — exe. Так же считает и `cargo deny` (пути без версий).

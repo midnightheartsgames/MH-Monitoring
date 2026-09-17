@@ -1551,14 +1551,14 @@ dependencies = [
 
 [[package]]
 name = "mh-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "mh-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mh-core",
  "mh-platform",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "mh-ipc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mh-core",
  "serde",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "mh-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mh-core",
  "windows",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "mh-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embed-resource",
  "mh-core",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "mh-sources"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mh-core",
  "mh-platform",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "mh-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "embed-resource",
