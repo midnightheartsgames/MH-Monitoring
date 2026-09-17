@@ -382,7 +382,9 @@ impl OverlayApp {
         self.next_target = now + TARGET_EVERY;
         let Some(backend) = &self.backend else { return };
         let now_ms = self.started.elapsed().as_millis() as u64;
-        let resolution = self.watcher.resolve(now_ms, &self.settings.fps.target_settings());
+        let has_frames = backend.snapshot().fps.availability == mh_core::FpsAvailability::Available;
+        let resolution =
+            self.watcher.resolve(now_ms, &self.settings.fps.target_settings(), has_frames);
         backend.set_target(resolution);
     }
 

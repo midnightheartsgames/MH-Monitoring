@@ -9,6 +9,8 @@ exclude = ["spikes"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/midnightheartsgames/MH-Monitoring"
 
 [profile.release]
 debug = 1

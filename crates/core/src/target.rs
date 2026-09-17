@@ -5,6 +5,8 @@
 //! 1. кандидата выдвигает окно в фокусе (оболочка и собственное окно не выдвигают никого);
 //! 2. кандидат обязан продержаться впереди [`DEFAULT_DEBOUNCE_MS`], прежде чем сменит цель —
 //!    иначе клик сквозь лаунчер перезапускает захват трижды;
+//!    * **2а:** цель, у которой идут кадры, меняется только на кандидата, который сам рисует
+//!      ([`SwitchGuard`]): Alt+Tab из игры в браузер или редактор не уводит захват с игры;
 //! 3. пока в фокусе оболочка или наше окно — Alt+Tab, открытые настройки — цель **удерживается**:
 //!    измеряется по-прежнему игра;
 //! 4. цель, которой больше нет, сбрасывается немедленно; переиспользованный PID не наследует
@@ -124,6 +126,25 @@ pub trait ProcessLookup {
     fn is_same_run_alive(&self, target: &TargetProcess) -> bool;
 }
 
+/// Когда кандидат может сменить живую цель (правило 2а).
+pub struct SwitchGuard<'a> {
+    /// У текущей цели идут кадры. Нет кадров — терять нечего, смена разрешена всегда.
+    pub target_has_frames: bool,
+    /// Рисует ли кандидат сам. Спрашивается, только когда от ответа зависит решение.
+    pub candidate_draws: &'a dyn Fn(&TargetProcess) -> bool,
+}
+
+impl SwitchGuard<'_> {
+    /// Без ограничений: любой устоявшийся кандидат меняет цель.
+    pub fn permissive() -> SwitchGuard<'static> {
+        SwitchGuard { target_has_frames: false, candidate_draws: &|_| true }
+    }
+
+    fn allows(&self, current: Option<&TargetProcess>, candidate: &TargetProcess) -> bool {
+        current.is_none() || !self.target_has_frames || (self.candidate_draws)(candidate)
+    }
+}
+
 /// Держит текущую цель и кандидата на смену.
 #[derive(Debug, Clone)]
 pub struct TargetTracker {
@@ -170,8 +191,20 @@ impl TargetTracker {
         settings: &TargetSettings,
         lookup: &dyn ProcessLookup,
     ) -> TargetResolution {
+        self.resolve_guarded(now_ms, foreground, settings, lookup, &SwitchGuard::permissive())
+    }
+
+    /// [`Self::resolve`] с правилом 2а.
+    pub fn resolve_guarded(
+        &mut self,
+        now_ms: Millis,
+        foreground: Option<&TargetProcess>,
+        settings: &TargetSettings,
+        lookup: &dyn ProcessLookup,
+        guard: &SwitchGuard<'_>,
+    ) -> TargetResolution {
         match settings.mode {
-            TargetMode::Auto => self.resolve_auto(now_ms, foreground, lookup),
+            TargetMode::Auto => self.resolve_auto(now_ms, foreground, lookup, guard),
             TargetMode::Manual => self.resolve_manual(settings, lookup),
         }
     }
@@ -181,6 +214,7 @@ impl TargetTracker {
         now_ms: Millis,
         foreground: Option<&TargetProcess>,
         lookup: &dyn ProcessLookup,
+        guard: &SwitchGuard<'_>,
     ) -> TargetResolution {
         if let Some(seen) = foreground {
             if seen.is_same_run_as_opt(self.current.as_ref()) {
@@ -191,7 +225,11 @@ impl TargetTracker {
                     self.candidate = Some(seen.clone());
                     self.candidate_since_ms = now_ms;
                 }
-                if now_ms.saturating_sub(self.candidate_since_ms) >= self.debounce_ms {
+                // Не пропущенный правилом 2а кандидат остаётся кандидатом: как только он начнёт
+                // рисовать или цель потеряет кадры, смена случится без нового ожидания.
+                if now_ms.saturating_sub(self.candidate_since_ms) >= self.debounce_ms
+                    && guard.allows(self.current.as_ref(), seen)
+                {
                     self.current = Some(seen.clone());
                     self.candidate = None;
                 }
@@ -391,6 +429,100 @@ mod tests {
         scene.foreground = Some(game.clone());
         scene.now += 200;
         assert_eq!(scene.resolved(&auto), game);
+    }
+
+    // --- правило 2а ----------------------------------------------------------------------
+
+    fn guarded(
+        scene: &mut Scene,
+        target_has_frames: bool,
+        draws: &dyn Fn(&TargetProcess) -> bool,
+    ) -> TargetResolution {
+        let guard = SwitchGuard { target_has_frames, candidate_draws: draws };
+        let auto = TargetSettings::auto();
+        scene.tracker.resolve_guarded(
+            scene.now,
+            scene.foreground.as_ref(),
+            &auto,
+            &scene.lookup,
+            &guard,
+        )
+    }
+
+    /// Alt+Tab из игры в редактор: игра рисует, редактор нет — цель остаётся.
+    #[test]
+    fn a_target_with_frames_is_kept_when_the_candidate_does_not_draw() {
+        let mut scene = Scene::new(DEFAULT_DEBOUNCE_MS);
+        let game = scene.start(4242, "game.exe", 1_000);
+        let editor = scene.start(77, "Code.exe", 1_000);
+        scene.foreground = Some(game.clone());
+        assert_eq!(scene.adopt(), game);
+
+        scene.foreground = Some(editor);
+        for _ in 0..10 {
+            scene.now += 1_000;
+            let resolution = guarded(&mut scene, true, &|_| false);
+            assert_eq!(resolution.target(), Some(&game));
+        }
+    }
+
+    /// Запущена вторая игра — она рисует, и цель переходит к ней.
+    #[test]
+    fn a_drawing_candidate_takes_over() {
+        let mut scene = Scene::new(DEFAULT_DEBOUNCE_MS);
+        let game = scene.start(4242, "game.exe", 1_000);
+        let other = scene.start(5000, "other.exe", 2_000);
+        scene.foreground = Some(game.clone());
+        assert_eq!(scene.adopt(), game);
+
+        scene.foreground = Some(other.clone());
+        guarded(&mut scene, true, &|_| true);
+        scene.now += 1_000;
+        assert_eq!(guarded(&mut scene, true, &|_| true).target(), Some(&other));
+    }
+
+    /// Кандидат начал рисовать позже — ждать заново не нужно.
+    #[test]
+    fn a_held_candidate_takes_over_as_soon_as_it_draws() {
+        let mut scene = Scene::new(DEFAULT_DEBOUNCE_MS);
+        let game = scene.start(4242, "game.exe", 1_000);
+        let loading = scene.start(5000, "other.exe", 2_000);
+        scene.foreground = Some(game.clone());
+        assert_eq!(scene.adopt(), game);
+
+        scene.foreground = Some(loading.clone());
+        guarded(&mut scene, true, &|_| false);
+        scene.now += 5_000;
+        assert_eq!(guarded(&mut scene, true, &|_| false).target(), Some(&game));
+        scene.now += 250;
+        assert_eq!(guarded(&mut scene, true, &|_| true).target(), Some(&loading));
+    }
+
+    /// У цели нет кадров — держаться не за что, работает обычное правило.
+    #[test]
+    fn a_target_without_frames_is_replaced_by_any_settled_candidate() {
+        let mut scene = Scene::new(DEFAULT_DEBOUNCE_MS);
+        let editor = scene.start(77, "Code.exe", 1_000);
+        let browser = scene.start(78, "chrome.exe", 1_000);
+        scene.foreground = Some(editor.clone());
+        assert_eq!(scene.adopt(), editor);
+
+        scene.foreground = Some(browser.clone());
+        let never_asked = |_: &TargetProcess| panic!("без кадров рисование не спрашивается");
+        guarded(&mut scene, false, &never_asked);
+        scene.now += 1_000;
+        assert_eq!(guarded(&mut scene, false, &never_asked).target(), Some(&browser));
+    }
+
+    /// Первая цель выбирается без правила 2а.
+    #[test]
+    fn the_first_target_needs_no_drawing() {
+        let mut scene = Scene::new(DEFAULT_DEBOUNCE_MS);
+        let editor = scene.start(77, "Code.exe", 1_000);
+        scene.foreground = Some(editor.clone());
+        guarded(&mut scene, true, &|_| false);
+        scene.now += 1_000;
+        assert_eq!(guarded(&mut scene, true, &|_| false).target(), Some(&editor));
     }
 
     /// Alt+Tab в проводник или открытие собственных настроек — не смена цели.

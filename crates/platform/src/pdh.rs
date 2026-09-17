@@ -4,8 +4,9 @@
 //! русской Windows другие, а английские работают везде.
 
 use windows_sys::Win32::System::Performance::{
-    PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE,
-    PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
+    PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE,
+    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
+    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
 
@@ -75,6 +76,56 @@ impl CounterQuery {
         let number = unsafe { value.Anonymous.doubleValue };
         number.is_finite().then_some(number)
     }
+
+    /// Все экземпляры счётчика с `*` в пути: имя экземпляра и значение.
+    ///
+    /// Экземпляры приходят и уходят вместе с процессами — PDH перечисляет их заново на каждом
+    /// замере. Экземпляр без годного значения пропускается.
+    pub fn instances(&self, index: usize) -> Vec<(String, f64)> {
+        let Some(&counter) = self.counters.get(index) else { return Vec::new() };
+        let format = PDH_FMT_DOUBLE | PDH_FMT_NOCAP100;
+        let mut size = 0u32;
+        let mut count = 0u32;
+        let status = unsafe {
+            PdhGetFormattedCounterArrayW(
+                counter,
+                format,
+                &mut size,
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != PDH_MORE_DATA || size == 0 {
+            return Vec::new();
+        }
+        // Буфер — в байтах: элементы, а за ними строки имён.
+        let item = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        let mut buffer =
+            vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); (size as usize).div_ceil(item)];
+        let status = unsafe {
+            PdhGetFormattedCounterArrayW(
+                counter,
+                format,
+                &mut size,
+                &mut count,
+                buffer.as_mut_ptr(),
+            )
+        };
+        if status != 0 {
+            return Vec::new();
+        }
+        buffer[..count as usize]
+            .iter()
+            .filter(|entry| {
+                matches!(entry.FmtValue.CStatus, PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA)
+            })
+            .filter_map(|entry| {
+                let value = unsafe { entry.FmtValue.Anonymous.doubleValue };
+                let name = unsafe { crate::sys::from_wide_ptr(entry.szName) };
+                value.is_finite().then_some((name, value))
+            })
+            .collect()
+    }
 }
 
 impl Drop for CounterQuery {
@@ -111,5 +162,18 @@ mod tests {
         assert!(performance > 0.0 && performance < 1_000.0, "{performance}");
         assert!(frequency > 100.0, "{frequency}");
         assert_eq!(query.value(5), None);
+    }
+
+    #[test]
+    fn wildcard_instances_are_listed() {
+        let mut query = CounterQuery::open(&[r"\Processor Information(*)\% Processor Time"])
+            .expect("счётчик процессора есть на любой Windows 10+");
+        query.collect().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        query.collect().unwrap();
+        let instances = query.instances(0);
+        assert!(instances.iter().any(|(name, _)| name == "_Total"), "{instances:?}");
+        assert!(instances.len() > 1);
+        assert!(query.instances(3).is_empty());
     }
 }

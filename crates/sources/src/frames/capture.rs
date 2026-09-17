@@ -211,13 +211,20 @@ impl FrameCapture {
     }
 
     /// Строка о том, что замер идёт не через основной источник, и чего это стоит.
-    fn fallback_note(&self, kind: SourceKind) -> Option<String> {
+    ///
+    /// Чего запасной источник не видит, говорится, только пока кадров нет: когда он их считает,
+    /// эта игра ему видна, и предупреждение лишь сбивало бы с толку. Вывод через GDI — обычный
+    /// случай для старых игр в окне, для него хватает короткой строки.
+    fn fallback_note(&self, kind: SourceKind, measuring: bool) -> Option<String> {
         if !self.on_fallback {
             return None;
         }
+        if measuring && self.fallback_cause == Some(FpsReason::PresentModeUntracked) {
+            return Some(format!("кадры считает {} (вывод через GDI)", kind.label()));
+        }
         let cause = self.fallback_cause.map(FpsReason::message).unwrap_or("не работает");
         let mut note = format!("{} вместо PresentMon ({cause})", kind.label());
-        if let Some(gap) = kind.coverage_gap() {
+        if let Some(gap) = kind.coverage_gap().filter(|_| !measuring) {
             note.push_str(" — ");
             note.push_str(gap);
         }
@@ -226,6 +233,7 @@ impl FrameCapture {
 
     fn report_state(&self, report: FrameReport, target: &TargetProcess) -> FpsState {
         let kind = self.active_kind().unwrap_or(SourceKind::PresentMon);
+        let measuring = matches!(report.status, FrameStatus::Measuring);
         let (availability, reason, failure_detail) = match report.status {
             FrameStatus::Starting => (FpsAvailability::Waiting, Some(FpsReason::NoFrames), None),
             FrameStatus::Measuring => (FpsAvailability::Available, None, None),
@@ -242,7 +250,7 @@ impl FrameCapture {
             availability,
             reason,
             // Слова источника об ошибке важнее заметки об откате: объясняют, что сломалось сейчас.
-            detail: failure_detail.or_else(|| self.fallback_note(kind)),
+            detail: failure_detail.or_else(|| self.fallback_note(kind, measuring)),
             target: Some(target.clone()),
             statistics: report.statistics,
             session_id: self.session_id,
@@ -270,7 +278,7 @@ impl FrameCapture {
                 _ => FpsAvailability::Error,
             },
             reason: Some(failure.reason),
-            detail: failure.detail.clone().or_else(|| self.fallback_note(kind)),
+            detail: failure.detail.clone().or_else(|| self.fallback_note(kind, false)),
             target: Some(target.clone()),
             session_id: self.session_id,
             ..FpsState::INITIAL

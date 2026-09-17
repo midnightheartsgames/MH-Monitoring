@@ -17,24 +17,24 @@ const AMD_FAMILY17_MODULE: &[u8] = include_bytes!("../../../../assets/pawnio/AMD
 /// бессмысленно: если занят так долго, значит кто-то завис, и лучше пропустить показание.
 const PCI_LOCK_TIMEOUT_MS: u32 = 50;
 
-/// Почему датчик недоступен.
+/// Почему датчик температуры CPU недоступен. Общая для AMD и Intel.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AmdSensorError {
-    /// Не AMD Zen: модуль рассчитан на семейства 17h–1Ah.
+pub enum CpuSensorError {
+    /// Процессор не того производителя или семейства, либо у него нет цифрового датчика.
     Unsupported,
     PawnIo(PawnIoError),
 }
 
-impl std::fmt::Display for AmdSensorError {
+impl std::fmt::Display for CpuSensorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AmdSensorError::Unsupported => write!(formatter, "процессор не AMD Zen"),
-            AmdSensorError::PawnIo(error) => write!(formatter, "{error}"),
+            CpuSensorError::Unsupported => write!(formatter, "процессор не поддерживается"),
+            CpuSensorError::PawnIo(error) => write!(formatter, "{error}"),
         }
     }
 }
 
-impl std::error::Error for AmdSensorError {}
+impl std::error::Error for CpuSensorError {}
 
 /// Одно показание. Каждое поле может отсутствовать само по себе.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -51,13 +51,13 @@ pub struct AmdCpuSensor {
 }
 
 impl AmdCpuSensor {
-    pub fn open(cpu: &CpuIdentity) -> Result<Self, AmdSensorError> {
+    pub fn open(cpu: &CpuIdentity) -> Result<Self, CpuSensorError> {
         if !cpu.is_amd_zen() {
-            return Err(AmdSensorError::Unsupported);
+            return Err(CpuSensorError::Unsupported);
         }
         let pawnio =
-            PawnIo::open_with_module(AMD_FAMILY17_MODULE).map_err(AmdSensorError::PawnIo)?;
-        let pci_lock = PciAccessLock::open().map_err(AmdSensorError::PawnIo)?;
+            PawnIo::open_with_module(AMD_FAMILY17_MODULE).map_err(CpuSensorError::PawnIo)?;
+        let pci_lock = PciAccessLock::open().map_err(CpuSensorError::PawnIo)?;
 
         let mut sensor = Self {
             pawnio,
@@ -121,7 +121,7 @@ mod tests {
     fn a_non_zen_cpu_is_rejected_before_touching_the_driver() {
         let intel =
             CpuIdentity { vendor: Vendor::Intel, family: 6, model: 0x9E, brand: "Intel".into() };
-        assert_eq!(AmdCpuSensor::open(&intel).err(), Some(AmdSensorError::Unsupported));
+        assert_eq!(AmdCpuSensor::open(&intel).err(), Some(CpuSensorError::Unsupported));
     }
 
     /// На этой машине — Ryzen. С правами и установленным PawnIO датчик обязан дать температуру

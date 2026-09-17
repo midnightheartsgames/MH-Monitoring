@@ -197,6 +197,7 @@ fn no_frames_from_the_primary_switches_to_the_fallback() {
 fn the_fallback_is_announced_with_what_it_cannot_see() {
     let mut rig = rig();
     rig.primary.set_status(FrameStatus::NoFrames);
+    rig.fallback.set_status(FrameStatus::NoFrames);
     rig.capture.set_target(Some(&game(4242, 1)));
 
     let state = rig.capture.poll(0);
@@ -206,6 +207,19 @@ fn the_fallback_is_announced_with_what_it_cannot_see() {
     assert!(note.contains("OpenGL"), "{note}");
     assert!(!note.contains("Vulkan"), "Vulkan этим источником виден: {note}");
     assert_eq!(state.message(), Some(note.as_str()), "HUD показывает именно эту строку");
+}
+
+/// Запасной источник считает кадры этой игры — значит, она ему видна, и про OpenGL не говорим.
+#[test]
+fn a_measuring_fallback_does_not_warn_about_what_it_cannot_see() {
+    let mut rig = rig();
+    rig.primary.set_status(FrameStatus::NoFrames);
+    rig.capture.set_target(Some(&game(4242, 1)));
+
+    let state = rig.capture.poll(0);
+    let note = state.detail.clone().expect("откат по-прежнему объявлен");
+    assert!(note.contains("собственный ETW"), "{note}");
+    assert!(!note.contains("OpenGL"), "{note}");
 }
 
 #[test]
@@ -232,7 +246,8 @@ fn an_untracked_present_mode_switches_to_the_fallback() {
     let state = rig.capture.poll(0);
     assert_eq!(rig.capture.active_kind(), Some(SourceKind::OwnEtw));
     assert!(state.is_delivering());
-    assert!(state.message().unwrap().contains(FpsReason::PresentModeUntracked.message()));
+    // Кадры идут — короткая строка без предупреждений (DMC4 SE в окне).
+    assert_eq!(state.message(), Some("кадры считает собственный ETW (вывод через GDI)"));
 }
 
 #[test]

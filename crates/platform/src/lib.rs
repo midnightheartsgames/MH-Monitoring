@@ -20,6 +20,8 @@ pub mod elevate;
 #[cfg(windows)]
 pub mod etw;
 #[cfg(windows)]
+pub mod gpu;
+#[cfg(windows)]
 pub mod instance;
 #[cfg(windows)]
 pub mod job;

@@ -8,15 +8,72 @@ use mh_core::{
 };
 use mh_platform::pawnio::PawnIoError;
 
-use super::amd_sensor::{AmdCpuSensor, AmdSensorError};
-use super::cpuid::identify;
+use super::amd_sensor::{AmdCpuSensor, CpuSensorError, CpuThermals};
+use super::cpuid::{Vendor, identify};
+use super::intel_sensor::{IntelCpuSensor, thermal_leaf};
 use super::nvml::NvmlSensor;
 use super::system::SystemSensor;
+use super::wddm::WddmGpuSensor;
+
+/// Видеокарта: NVIDIA через NVML — там больше полей, включая мощность; остальные через WDDM.
+enum GpuSensor {
+    // NVML тяжёлая (таблица функций библиотеки), держим её в куче.
+    Nvml(Box<NvmlSensor>),
+    Wddm(WddmGpuSensor),
+}
+
+impl GpuSensor {
+    fn open() -> Result<Self, SensorReason> {
+        match NvmlSensor::open() {
+            Ok(sensor) => Ok(GpuSensor::Nvml(Box::new(sensor))),
+            Err(_) => WddmGpuSensor::open().map(GpuSensor::Wddm),
+        }
+    }
+
+    fn read_load(&mut self) -> GpuStats {
+        match self {
+            GpuSensor::Nvml(sensor) => sensor.read_load(),
+            GpuSensor::Wddm(sensor) => sensor.read_load(),
+        }
+    }
+
+    fn read_slow(&mut self) -> GpuStats {
+        match self {
+            GpuSensor::Nvml(sensor) => sensor.read_slow(),
+            GpuSensor::Wddm(sensor) => sensor.read_slow(),
+        }
+    }
+}
+
+/// Температура и мощность CPU: у AMD и Intel разные модули PawnIO и разные регистры.
+enum CpuThermalSensor {
+    Amd(AmdCpuSensor),
+    Intel(IntelCpuSensor),
+}
+
+impl CpuThermalSensor {
+    fn open() -> Result<Self, CpuSensorError> {
+        let cpu = identify();
+        match cpu.vendor {
+            Vendor::Intel => {
+                IntelCpuSensor::open(&cpu, thermal_leaf()).map(CpuThermalSensor::Intel)
+            }
+            _ => AmdCpuSensor::open(&cpu).map(CpuThermalSensor::Amd),
+        }
+    }
+
+    fn read(&mut self, now_ms: Millis) -> CpuThermals {
+        match self {
+            CpuThermalSensor::Amd(sensor) => sensor.read(now_ms),
+            CpuThermalSensor::Intel(sensor) => sensor.read(now_ms),
+        }
+    }
+}
 
 pub struct HardwareSampler {
     system: SystemSensor,
-    gpu: Result<NvmlSensor, SensorReason>,
-    cpu_thermals: Result<AmdCpuSensor, SensorReason>,
+    gpu: Result<GpuSensor, SensorReason>,
+    cpu_thermals: Result<CpuThermalSensor, SensorReason>,
 }
 
 impl Default for HardwareSampler {
@@ -29,8 +86,8 @@ impl HardwareSampler {
     pub fn open() -> Self {
         Self {
             system: SystemSensor::new(),
-            gpu: NvmlSensor::open(),
-            cpu_thermals: AmdCpuSensor::open(&identify()).map_err(|error| cpu_reason(&error)),
+            gpu: GpuSensor::open(),
+            cpu_thermals: CpuThermalSensor::open().map_err(|error| cpu_reason(&error)),
         }
     }
 
@@ -42,14 +99,14 @@ impl HardwareSampler {
     pub fn sample(&mut self, tier: SampleTier, now_ms: Millis) -> HardwareSample {
         let (gpu, cpu, memory) = match tier {
             SampleTier::Load => {
-                let gpu = match &self.gpu {
+                let gpu = match &mut self.gpu {
                     Ok(sensor) => sensor.read_load(),
                     Err(reason) => unavailable_gpu(*reason),
                 };
                 (gpu, self.system.read_load(), Default::default())
             }
             SampleTier::Slow => {
-                let gpu = match &self.gpu {
+                let gpu = match &mut self.gpu {
                     Ok(sensor) => sensor.read_slow(),
                     Err(reason) => unavailable_gpu(*reason),
                 };
@@ -81,12 +138,12 @@ fn unavailable_gpu(reason: SensorReason) -> GpuStats {
     GpuStats { health: SectionHealth::unavailable(reason), ..Default::default() }
 }
 
-fn cpu_reason(error: &AmdSensorError) -> SensorReason {
+fn cpu_reason(error: &CpuSensorError) -> SensorReason {
     match error {
-        AmdSensorError::Unsupported => SensorReason::CpuNotSupported,
-        AmdSensorError::PawnIo(PawnIoError::NotInstalled) => SensorReason::PawnIoMissing,
-        AmdSensorError::PawnIo(PawnIoError::AccessDenied) => SensorReason::NeedsAdmin,
-        AmdSensorError::PawnIo(_) => SensorReason::SensorReadFailed,
+        CpuSensorError::Unsupported => SensorReason::CpuNotSupported,
+        CpuSensorError::PawnIo(PawnIoError::NotInstalled) => SensorReason::PawnIoMissing,
+        CpuSensorError::PawnIo(PawnIoError::AccessDenied) => SensorReason::NeedsAdmin,
+        CpuSensorError::PawnIo(_) => SensorReason::SensorReadFailed,
     }
 }
 
@@ -118,13 +175,13 @@ mod tests {
 
     #[test]
     fn pawnio_errors_map_to_reasons_the_user_can_act_on() {
-        assert_eq!(cpu_reason(&AmdSensorError::Unsupported), SensorReason::CpuNotSupported);
+        assert_eq!(cpu_reason(&CpuSensorError::Unsupported), SensorReason::CpuNotSupported);
         assert_eq!(
-            cpu_reason(&AmdSensorError::PawnIo(PawnIoError::NotInstalled)),
+            cpu_reason(&CpuSensorError::PawnIo(PawnIoError::NotInstalled)),
             SensorReason::PawnIoMissing
         );
         assert_eq!(
-            cpu_reason(&AmdSensorError::PawnIo(PawnIoError::AccessDenied)),
+            cpu_reason(&CpuSensorError::PawnIo(PawnIoError::AccessDenied)),
             SensorReason::NeedsAdmin
         );
     }

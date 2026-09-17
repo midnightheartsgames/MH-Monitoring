@@ -42,7 +42,8 @@ pub use ring::FrametimeRing;
 pub use session_name::{SESSION_PREFIX, session_name, should_sweep};
 pub use statistics::FrameStatistics;
 pub use target::{
-    ProcessLookup, TargetMode, TargetResolution, TargetSettings, TargetTracker, is_shell_process,
+    ProcessLookup, SwitchGuard, TargetMode, TargetResolution, TargetSettings, TargetTracker,
+    is_shell_process,
 };
 pub use telemetry::{
     CpuStats, GpuStats, MemoryStats, SectionHealth, SensorReason, SensorStatus, Snapshot,

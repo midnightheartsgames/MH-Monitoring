@@ -2,6 +2,7 @@
 name = "mh-platform"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Тонкие обёртки Win32: ETW-сессии, процессы, overlay, хоткеи"
 
 [dependencies]
@@ -12,6 +13,7 @@ mh-core = { path = "../core" }
 # рабочего пространства, а не только для двух крейтов из трёх.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
+    "Wdk_Graphics_Direct3D",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",

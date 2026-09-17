@@ -19,6 +19,21 @@ pub fn from_wide(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..end])
 }
 
+/// Читает UTF-16 строку с завершающим нулём по указателю. Нулевой указатель — пустая строка.
+///
+/// # Safety
+/// `pointer` — нуль или строка, завершённая нулём и живая на время вызова.
+pub unsafe fn from_wide_ptr(pointer: *const u16) -> String {
+    if pointer.is_null() {
+        return String::new();
+    }
+    let mut length = 0;
+    while unsafe { *pointer.add(length) } != 0 {
+        length += 1;
+    }
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, length) })
+}
+
 /// Системный текст ошибки.
 ///
 /// Голый код вроде `5` в логе бесполезен, а различать «нет прав» и «сессия уже существует»

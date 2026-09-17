@@ -57,7 +57,7 @@ impl SensorStatus {
 pub enum SensorReason {
     /// `nvml.dll` не найдена — драйвер NVIDIA не установлен.
     GpuDriverMissing,
-    /// NVML есть, но видеокарты NVIDIA нет. AMD и Intel — задача ADLX и IGCL (решение D3).
+    /// Ни NVML, ни ядро графики не нашли видеокарту.
     NoSupportedGpu,
     /// NVML ответил ошибкой.
     GpuQueryFailed,
@@ -75,7 +75,7 @@ impl SensorReason {
     pub fn message(self) -> &'static str {
         match self {
             SensorReason::GpuDriverMissing => "драйвер NVIDIA не найден",
-            SensorReason::NoSupportedGpu => "видеокарта не поддерживается",
+            SensorReason::NoSupportedGpu => "видеокарта не найдена",
             SensorReason::GpuQueryFailed => "видеокарта не отвечает",
             SensorReason::PawnIoMissing => "установите PawnIO для температуры и мощности",
             SensorReason::NeedsAdmin => "нужны права администратора",
