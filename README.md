@@ -1,5 +1,9 @@
 # MH Monitoring
 
+<p align="center">
+  <img src="assets/mh-Monitoring.png" alt="MH Forge" width="600">
+</p>
+
 [![Лицензия: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <img src="docs/hud.png" alt="HUD MH Monitoring поверх игры" width="272" align="right">
