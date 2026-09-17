@@ -45,7 +45,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Тесты
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Чистые крейты собираются и не под Windows
         run: cargo check --workspace --locked --target x86_64-unknown-linux-gnu
