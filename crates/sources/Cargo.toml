@@ -3,6 +3,7 @@ name = "mh-sources"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Источники данных MH Monitoring: кадры (PresentMon, собственный ETW), железо"
 
 [dependencies]

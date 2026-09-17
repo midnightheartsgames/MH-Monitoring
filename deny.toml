@@ -1,0 +1,50 @@
+# Проверка цепочки поставок: `cargo deny check` (PLAN.md §6/P9).
+#
+# Служба работает от SYSTEM, поэтому чужой код в зависимостях получает права системы. Здесь
+# ловится то, что ловится автоматически: известные уязвимости и отозванные версии (RustSec),
+# чужие реестры и git-источники, неожиданные лицензии. Вредоносную версию, которую ещё никто не
+# заметил, это не поймает — от неё защищают `Cargo.lock`, `--locked` и ручной просмотр обновлений.
+
+[graph]
+# Дистрибутив только под Windows x64: зависимости других платформ в него не попадают.
+targets = ["x86_64-pc-windows-msvc"]
+all-features = false
+
+[advisories]
+# Отозванные (yanked) версии — ошибка: так crates.io помечает в том числе вредоносные.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# Свои крейты подключены путями без версии — это не «звёздочка».
+allow-wildcard-paths = true
+
+[sources]
+# Только crates.io: никаких git-зависимостей и сторонних реестров.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

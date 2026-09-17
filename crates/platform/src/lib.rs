@@ -16,9 +16,15 @@
 #[cfg(windows)]
 pub mod console;
 #[cfg(windows)]
+pub mod diag;
+#[cfg(windows)]
+pub mod dialog;
+#[cfg(windows)]
 pub mod elevate;
 #[cfg(windows)]
 pub mod etw;
+#[cfg(windows)]
+pub mod game_window;
 #[cfg(windows)]
 pub mod gpu;
 #[cfg(windows)]

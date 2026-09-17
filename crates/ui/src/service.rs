@@ -1,101 +1,42 @@
-//! Режим службы Windows и её установка (PLAN.md §6/P6).
+//! Установка и управление службой Windows (PLAN.md §6/P6, §6/P9).
 //!
-//! Один исполняемый файл: `MH-Monitoring.exe --service` запускает SCM, `--install-service` и
+//! Сама служба — отдельный `MH-Monitoring-Service.exe` (крейт `mh-service`). Здесь только клиент
+//! SCM: поставить, запустить, проверить, снять. `--install-service`, `--start-service` и
 //! `--uninstall-service` вызывает UI с запросом UAC.
 
 use std::ffi::OsString;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use mh_ipc::SERVICE_NAME;
 use windows_service::service::{
-    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
-    ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
-    ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl, ServiceFailureActions,
+    ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState, ServiceType,
 };
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-use windows_service::{define_windows_service, service_dispatcher};
 
-use crate::{diag, server, settings};
+use crate::diag;
 
-pub const SERVICE_NAME: &str = "MHMonitor";
 const DISPLAY_NAME: &str = "MH Monitoring";
 const DESCRIPTION: &str =
     "Захват кадров (ETW, PresentMon) и датчиков для оверлея MH Monitoring без прав администратора.";
 
-define_windows_service!(ffi_service_main, service_main);
-
-/// Точка входа `--service`. Возвращается, когда SCM остановил службу.
-pub fn run_dispatcher() -> windows_service::Result<()> {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-}
-
-fn service_main(_arguments: Vec<OsString>) {
-    diag::start(settings::local_dir().join("service.log"));
-    diag::log(format!("служба MH Monitoring {}", env!("CARGO_PKG_VERSION")));
-    if let Err(error) = run_service() {
-        diag::log(format!("служба завершилась с ошибкой: {error}"));
-    }
-}
-
-fn run_service() -> windows_service::Result<()> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let handler_stop = Arc::clone(&stop);
-    let status = service_control_handler::register(SERVICE_NAME, move |control| match control {
-        ServiceControl::Stop | ServiceControl::Shutdown => {
-            handler_stop.store(true, Ordering::SeqCst);
-            server::wake();
-            ServiceControlHandlerResult::NoError
-        }
-        ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-        _ => ServiceControlHandlerResult::NotImplemented,
-    })?;
-
-    let report = |state: ServiceState, accept: ServiceControlAccept, code: u32| {
-        status.set_service_status(ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: state,
-            controls_accepted: accept,
-            exit_code: ServiceExitCode::Win32(code),
-            checkpoint: 0,
-            wait_hint: Duration::from_secs(5),
-            process_id: None,
-        })
-    };
-
-    report(ServiceState::Running, ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN, 0)?;
-    let code = match server::run(stop) {
-        Ok(()) => 0,
-        Err(error) => {
-            diag::log(format!("сервер: {error}"));
-            error.raw_os_error().unwrap_or(1) as u32
-        }
-    };
-    report(ServiceState::Stopped, ServiceControlAccept::empty(), code)?;
-    Ok(())
-}
-
-/// Отладочный режим `--serve`: тот же сервер в обычном процессе, до Ctrl+C.
-pub fn run_in_console() -> std::io::Result<()> {
-    diag::start(settings::local_dir().join("serve.log"));
-    diag::log("сервер в консоли");
-    let stop = Arc::new(AtomicBool::new(false));
-    server::run(stop)
-}
-
-/// `--install-service`: ставит службу на этот исполняемый файл — для разработки. Обычная
-/// установка (`--install`) ставит её на копию в Program Files.
+/// `--install-service`: ставит службу на `MH-Monitoring-Service.exe` рядом с этим файлом — для
+/// разработки. Обычная установка (`--install`) ставит её на копию в Program Files.
 pub fn install() -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    install_at(&executable)
+    let service = executable.with_file_name(mh_ipc::SERVICE_EXE_NAME);
+    if !service.is_file() {
+        return Err(format!("нет файла службы: {}", service.display()));
+    }
+    install_at(&service)
 }
 
-/// Ставит службу на `executable` и запускает её.
+/// Ставит службу на `executable` (`MH-Monitoring-Service.exe`) и запускает её.
 ///
 /// Служба работает от SYSTEM и запускает **этот** exe: держать его нужно там, куда обычный
 /// пользователь писать не может (Program Files), иначе подмена файла даёт права SYSTEM.
-pub fn install_at(executable: &std::path::Path) -> Result<(), String> {
+pub fn install_at(executable: &Path) -> Result<(), String> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -145,14 +86,21 @@ fn restart_on_failure() -> ServiceFailureActions {
 
 /// Установлена ли служба и работает ли она. Прав не требует.
 pub fn is_running() -> bool {
-    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-    else {
-        return false;
-    };
-    manager
-        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
-        .and_then(|service| service.query_status())
-        .is_ok_and(|status| status.current_state == ServiceState::Running)
+    state() == Some(ServiceState::Running)
+}
+
+/// Установлена, но стоит — её можно запустить. «Запускается» сюда не входит: при входе в систему
+/// служба с автозапуском часто ещё поднимается, и UAC в этот момент был бы лишним.
+pub fn is_stopped() -> bool {
+    state() == Some(ServiceState::Stopped)
+}
+
+/// Состояние службы; `None` — не установлена или SCM недоступен.
+fn state() -> Option<ServiceState> {
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS).ok()?;
+    service.query_status().ok().map(|status| status.current_state)
 }
 
 /// `--start-service`: запускает остановленную службу. Требует прав администратора.
@@ -186,7 +134,7 @@ pub fn remove_if_present() -> Result<(), String> {
 }
 
 /// Путь к exe, на который зарегистрирована служба.
-pub fn registered_executable() -> Option<std::path::PathBuf> {
+pub fn registered_executable() -> Option<PathBuf> {
     let manager =
         ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
     let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG).ok()?;
@@ -194,14 +142,14 @@ pub fn registered_executable() -> Option<std::path::PathBuf> {
     Some(executable_of_command(&command.to_string_lossy()))
 }
 
-/// SCM хранит командную строку целиком: `"C:\путь\MH-Monitoring.exe" --service`.
-fn executable_of_command(command: &str) -> std::path::PathBuf {
+/// SCM хранит командную строку целиком: `"C:\путь\MH-Monitoring-Service.exe" --service`.
+fn executable_of_command(command: &str) -> PathBuf {
     let command = command.trim();
     let path = match command.strip_prefix('"') {
         Some(rest) => rest.split('"').next().unwrap_or(rest),
         None => command.split(" --").next().unwrap_or(command),
     };
-    std::path::PathBuf::from(path)
+    PathBuf::from(path)
 }
 
 fn removal_access() -> ServiceAccess {
@@ -231,15 +179,14 @@ fn describe(error: windows_service::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn the_executable_is_cut_out_of_the_command_line() {
         assert_eq!(
             executable_of_command(
-                r#""C:\Program Files\MH Monitoring\MH-Monitoring.exe" --service"#
+                r#""C:\Program Files\MH Monitoring\MH-Monitoring-Service.exe" --service"#
             ),
-            PathBuf::from(r"C:\Program Files\MH Monitoring\MH-Monitoring.exe")
+            PathBuf::from(r"C:\Program Files\MH Monitoring\MH-Monitoring-Service.exe")
         );
         assert_eq!(
             executable_of_command(r"I:\x\MH-Monitoring.exe --service"),

@@ -1,13 +1,15 @@
 //! MH Monitoring — оверлей производительности (PLAN.md §6/P4).
 //!
-//! Пока движок работает в этом же процессе (разделение на службу — P6), поэтому для кадров и
-//! температуры CPU приложение нужно запускать от администратора. Без прав HUD так и скажет.
+//! Кадры и температуру CPU меряет служба `MH-Monitoring-Service.exe` (P6, P9). Без неё движок
+//! работает в этом процессе и видит всё только с правами администратора.
 
 // В отладочной сборке консоль остаётся: в неё пишут паники.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod format;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod games;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod settings;
 
@@ -26,11 +28,11 @@ mod installer;
 #[cfg(windows)]
 mod remote;
 #[cfg(windows)]
-mod server;
-#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 mod settings_window;
+#[cfg(windows)]
+mod setup_window;
 #[cfg(windows)]
 mod theme;
 
@@ -38,19 +40,14 @@ mod theme;
 fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
-    // Режимы без окна: служба, отладочный сервер, установка. Остальное — оверлей.
+    // Режимы без окна: установка и служба. Остальное — оверлей.
     match std::env::args().nth(1).as_deref() {
-        Some("--service") => match service::run_dispatcher() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::from(1),
-        },
-        Some("--serve") => match service::run_in_console() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("сервер: {error}");
-                ExitCode::from(1)
-            }
-        },
+        // Регистрация службы из версий до P9 запускает этот файл. Оверлей от SYSTEM в сеансе 0
+        // запускать нельзя: отказ, и SCM видит сбой, пока программу не переустановят.
+        Some("--service" | "--serve") => {
+            eprintln!("служба теперь — {}; переустановите MH Monitoring", mh_ipc::SERVICE_EXE_NAME);
+            ExitCode::from(1)
+        }
         Some("--install") => report(installer::install()),
         Some("--uninstall") => {
             let arguments: Vec<String> = std::env::args().collect();
@@ -66,13 +63,24 @@ fn main() -> std::process::ExitCode {
         Some("--install-service") => report(service::install()),
         Some("--start-service") => report(service::start()),
         Some("--uninstall-service") => report(service::uninstall()),
-        _ => match app::run() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(1)
-            }
-        },
+        // Ярлык игры: запустить её, а дальше — обычный оверлей (если он уже работает, эта копия
+        // тут же выйдет).
+        Some(games::LAUNCH_ARG) => {
+            games::launch_from_arguments(&std::env::args().collect::<Vec<_>>());
+            run_overlay()
+        }
+        _ => run_overlay(),
+    }
+}
+
+#[cfg(windows)]
+fn run_overlay() -> std::process::ExitCode {
+    match app::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::from(1)
+        }
     }
 }
 

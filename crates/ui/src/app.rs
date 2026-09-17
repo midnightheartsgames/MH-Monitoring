@@ -13,9 +13,11 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use crate::backend::{Backend, LocalConfig};
 use crate::controls::{Command, Controls};
 use crate::diag;
+use crate::games::BorderlessWatcher;
 use crate::hud::{self, HudActions, SeenRows};
-use crate::settings::{self, Settings};
+use crate::settings::{self, FullscreenMode, Settings};
 use crate::settings_window::{self, Page, ServiceRequest, SettingsWindow};
+use crate::setup_window::{self, SetupChoice, SetupWindow};
 use crate::theme;
 
 /// Как часто оверлей снова забирает верх z-порядка и проверяет своё место на экране.
@@ -36,13 +38,22 @@ const FULLSCREEN_TOOLTIP: &str =
     "MH Monitoring скрыт: игра в эксклюзивном полноэкранном режиме. Выберите безрамочный режим.";
 const FULLSCREEN_NOTE: &str =
     "эксклюзивный полноэкранный режим: HUD там не виден — выберите в игре безрамочный";
+const FULLSCREEN_MOVED_TOOLTIP: &str =
+    "MH Monitoring: игра в эксклюзивном полноэкранном режиме — HUD на другом мониторе.";
+/// Отступ HUD от угла рабочей области другого монитора, в физических пикселях.
+const MOVED_MARGIN: i32 = 20;
+/// Когда после старта проверить, не стоит ли служба. Не сразу: при входе в систему служба с
+/// автозапуском может ещё подниматься, и запрос UAC был бы лишним.
+const SERVICE_START_DELAY: Duration = Duration::from_secs(5);
+/// Аргумент перезапуска себя от администратора: новая копия ждёт, пока уйдёт старая.
+const RELAUNCHED_ARG: &str = "--relaunched";
 /// Оценка размера окна для проверки позиции до первого кадра, в физических пикселях.
 const ESTIMATED_SIZE: (i32, i32) = (272, 420);
 
 pub fn run() -> eframe::Result {
     // Один оверлей на пользователя. После установки новая копия ждёт, пока уйдёт старая.
-    let after_install = std::env::args().any(|arg| arg == "--after-install");
-    let wait = if after_install { Duration::from_secs(10) } else { Duration::ZERO };
+    let handed_over = std::env::args().any(|arg| arg == "--after-install" || arg == RELAUNCHED_ARG);
+    let wait = if handed_over { Duration::from_secs(10) } else { Duration::ZERO };
     let Some(_instance) = mh_platform::instance::SingleInstance::acquire(INSTANCE_MUTEX, wait)
     else {
         return Ok(());
@@ -120,6 +131,17 @@ struct Applied {
     scale: f32,
 }
 
+/// Что сделано с HUD из-за эксклюзивного полноэкранного режима.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fullscreen {
+    /// Режима нет.
+    Off,
+    /// Спрятан, настройка видимости не тронута.
+    Hidden,
+    /// Перенесён на другой монитор; `home` — где стоял до этого.
+    Moved { home: (i32, i32) },
+}
+
 impl Applied {
     fn of(settings: &Settings) -> Applied {
         Applied {
@@ -173,10 +195,19 @@ struct OverlayApp {
     exiting: bool,
     /// Удаление стёрло данные пользователя — настройки больше не записываются.
     settings_removed: bool,
-    /// Игра в эксклюзивном полноэкранном режиме — оверлей спрятан, не трогая настройку видимости.
-    fullscreen_hidden: bool,
+    /// Игра в эксклюзивном полноэкранном режиме — оверлей спрятан или перенесён.
+    fullscreen: Fullscreen,
     /// До какого момента показывать в HUD подсказку после выхода из такого режима.
     fullscreen_note_until: Option<Instant>,
+    setup_window: SetupWindow,
+    /// Почему не удался выбор в окне первого запуска.
+    setup_status: Option<String>,
+    /// Сколько мониторов подключено — для подсказки в окне первого запуска.
+    monitor_count: usize,
+    /// Когда проверить остановленную службу и попросить её запустить.
+    service_start_due: Option<Instant>,
+    /// Окна игр без рамки на весь монитор.
+    borderless: BorderlessWatcher,
 }
 
 impl OverlayApp {
@@ -220,14 +251,28 @@ impl OverlayApp {
         let backend = Backend::start(ctx, &local);
 
         let mut settings_window = SettingsWindow::default();
-        // Первый запуск скачанного файла — сразу предложить установку.
-        if !crate::installer::running_installed() {
+        let installed = crate::installer::installed_version();
+        let running_installed = crate::installer::running_installed();
+        // Первый запуск: без выбора в окне FPS не будет, а README читают не все.
+        let setup = !settings.setup_done
+            && !running_installed
+            && !mh_platform::instance::is_elevated()
+            && !backend.is_remote();
+        if setup {
+            diag::log("окно первого запуска");
+            settings.overlay.visible = true;
+        } else if !running_installed
+            && installed.as_deref().is_some_and(|version| version != env!("CARGO_PKG_VERSION"))
+        {
+            // Запущена не та версия, что установлена, — предложить обновить установку.
             let position = window.as_ref().and_then(|window| {
                 settings_position(window, cc.egui_ctx.pixels_per_point(), settings.overlay.scale)
             });
             settings.overlay.visible = true;
             settings_window.open_page(&settings, position, Page::Service);
         }
+        let service_start_due = (installed.is_some() && backend.is_local())
+            .then(|| Instant::now() + SERVICE_START_DELAY);
         // `MH-Monitoring.exe --settings` — сразу с открытыми настройками (ярлык, проверка).
         if std::env::args().any(|arg| arg == "--settings") {
             // Как и из трея: без видимого оверлея окно настроек не рисуется.
@@ -266,8 +311,13 @@ impl OverlayApp {
             pixels_per_point: cc.egui_ctx.pixels_per_point(),
             exiting: false,
             settings_removed: false,
-            fullscreen_hidden: false,
+            fullscreen: Fullscreen::Off,
             fullscreen_note_until: None,
+            setup_window: SetupWindow::new(setup),
+            setup_status: None,
+            monitor_count: mh_platform::overlay::monitors().len(),
+            service_start_due,
+            borderless: BorderlessWatcher::default(),
         }
     }
 
@@ -297,7 +347,7 @@ impl OverlayApp {
     /// Доводит окно и движок до настроек. Вызывается каждый кадр; дёшево, пока ничего не менялось.
     fn sync(&mut self, ctx: &egui::Context) {
         let mut wanted = Applied::of(&self.settings);
-        wanted.visible &= !self.fullscreen_hidden;
+        wanted.visible &= self.fullscreen != Fullscreen::Hidden;
         let previous = self.applied.replace(wanted.clone());
         if previous.as_ref() == Some(&wanted) {
             return;
@@ -338,11 +388,19 @@ impl OverlayApp {
         }
         self.next_housekeeping = now + HOUSEKEEPING;
         self.check_exclusive_fullscreen(now);
+        self.borderless.tick(&self.settings.games);
+        if self.setup_window.open {
+            self.monitor_count = mh_platform::overlay::monitors().len();
+        }
         let Some(window) = self.window else { return };
-        if !self.settings.overlay.visible || self.fullscreen_hidden {
+        if !self.settings.overlay.visible || self.fullscreen == Fullscreen::Hidden {
             return;
         }
         window.reassert_overlay_style();
+        if let Fullscreen::Moved { .. } = self.fullscreen {
+            // Порядок окон не трогаем и место не запоминаем: HUD здесь временно.
+            return;
+        }
         if self.settings.overlay.always_on_top {
             window.bring_to_top();
         }
@@ -357,22 +415,96 @@ impl OverlayApp {
         self.settings.overlay.y = Some(rect.top);
     }
 
-    /// Эксклюзивный полноэкранный режим: оверлей уходит с экрана и не трогает порядок окон, иначе
-    /// игра считает себя перекрытой и перестаёт рисовать (PLAN.md §2.16).
+    /// Эксклюзивный полноэкранный режим: оверлей уходит с монитора игры и не трогает порядок окон,
+    /// иначе игра считает себя перекрытой и перестаёт рисовать (PLAN.md §2.16). Куда уходит,
+    /// решает настройка: прячется или переезжает на другой монитор (§6/P9).
     fn check_exclusive_fullscreen(&mut self, now: Instant) {
         let exclusive = mh_platform::overlay::exclusive_fullscreen_active();
-        if exclusive == self.fullscreen_hidden {
+        if exclusive == (self.fullscreen != Fullscreen::Off) {
             return;
         }
-        self.fullscreen_hidden = exclusive;
-        if exclusive {
-            diag::log("эксклюзивный полноэкранный режим — оверлей скрыт");
-            self.controls.set_tooltip(FULLSCREEN_TOOLTIP);
-            self.fullscreen_note_until = None;
-        } else {
-            diag::log("эксклюзивный полноэкранный режим закончился");
+        if !exclusive {
+            if let (Fullscreen::Moved { home: (x, y) }, Some(window)) =
+                (self.fullscreen, self.window)
+            {
+                window.move_to(x, y);
+                diag::log("эксклюзивный полноэкранный режим закончился — HUD на месте");
+            } else {
+                diag::log("эксклюзивный полноэкранный режим закончился");
+                self.fullscreen_note_until = Some(now + FULLSCREEN_NOTE_FOR);
+            }
+            self.fullscreen = Fullscreen::Off;
             self.controls.set_tooltip("MH Monitoring");
-            self.fullscreen_note_until = Some(now + FULLSCREEN_NOTE_FOR);
+            return;
+        }
+        self.fullscreen_note_until = None;
+        if let Some((home, x, y)) = self.other_monitor_spot() {
+            if let Some(window) = self.window {
+                window.move_to(x, y);
+            }
+            diag::log("эксклюзивный полноэкранный режим — HUD на другом мониторе");
+            self.fullscreen = Fullscreen::Moved { home };
+            self.controls.set_tooltip(FULLSCREEN_MOVED_TOOLTIP);
+        } else {
+            diag::log("эксклюзивный полноэкранный режим — оверлей скрыт");
+            self.fullscreen = Fullscreen::Hidden;
+            self.controls.set_tooltip(FULLSCREEN_TOOLTIP);
+        }
+    }
+
+    /// Куда перенести HUD: `(прежнее место, x, y)`. `None` — прятать: так настроено, монитор
+    /// один или HUD скрыт.
+    fn other_monitor_spot(&self) -> Option<((i32, i32), i32, i32)> {
+        use mh_platform::overlay::{foreground_monitor, monitors, other_work_area};
+        if self.settings.overlay.fullscreen != FullscreenMode::OtherMonitor
+            || !self.settings.overlay.visible
+        {
+            return None;
+        }
+        let rect = self.window?.rect()?;
+        let game = foreground_monitor()?;
+        let work = other_work_area(&monitors(), game.bounds)?;
+        Some(((rect.left, rect.top), work.left + MOVED_MARGIN, work.top + MOVED_MARGIN))
+    }
+
+    /// Установка есть, а служба стоит — попросить её запустить, один раз за запуск.
+    fn start_stopped_service(&mut self) {
+        if self.service_start_due.is_none_or(|due| Instant::now() < due) {
+            return;
+        }
+        self.service_start_due = None;
+        let local = self.backend.as_ref().is_some_and(Backend::is_local);
+        if local && self.service_task.is_none() && crate::service::is_stopped() {
+            diag::log("служба остановлена — запрос на запуск");
+            self.request_service(ServiceRequest::StartService);
+        }
+    }
+
+    /// Выбор в окне первого запуска.
+    fn apply_setup(&mut self, choice: SetupChoice) {
+        diag::log(format!("первый запуск: {choice:?}"));
+        self.setup_status = None;
+        if let Err(error) = crate::installer::set_autostart(self.setup_window.autostart) {
+            diag::log(format!("автозапуск не изменён: {error}"));
+        }
+        match choice {
+            // Окно закроется, когда установка удастся (`poll_service_task`).
+            SetupChoice::Install => self.request_service(ServiceRequest::Install),
+            SetupChoice::ElevateOnce => {
+                let launched = std::env::current_exe()
+                    .and_then(|exe| mh_platform::elevate::launch_elevated(&exe, RELAUNCHED_ARG));
+                match launched {
+                    Ok(()) => {
+                        diag::log("перезапуск от администратора — эта копия выходит");
+                        self.exiting = true;
+                    }
+                    Err(error) => self.setup_status = Some(format!("не запущено: {error}")),
+                }
+            }
+            SetupChoice::Skip => {
+                self.settings.setup_done = true;
+                self.setup_window.open = false;
+            }
         }
     }
 
@@ -469,6 +601,14 @@ impl OverlayApp {
         };
         diag::log(format!("установка: {text}"));
         let succeeded = text == "готово";
+        if self.setup_window.open && self.pending_handover {
+            if succeeded {
+                self.settings.setup_done = true;
+                self.setup_window.open = false;
+            } else {
+                self.setup_status = Some(format!("установка: {text}"));
+            }
+        }
         self.service_status = Some(text);
         if code == Some(crate::installer::EXIT_CANCELLED) {
             // Ничего не удалено — служба на месте.
@@ -552,8 +692,9 @@ impl eframe::App for OverlayApp {
         self.update_target();
         self.check_service(ctx);
         self.poll_service_task(ctx);
+        self.start_stopped_service();
         self.housekeeping();
-        if self.fullscreen_hidden {
+        if self.fullscreen != Fullscreen::Off || self.service_start_due.is_some() {
             // Скрытое окно само не перерисовывается — а выход из режима нужно заметить.
             ctx.request_repaint_after(HOUSEKEEPING);
         }
@@ -583,6 +724,7 @@ impl eframe::App for OverlayApp {
             notes.push(FULLSCREEN_NOTE.to_string());
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        notes.extend(self.borderless.problem.clone());
         notes.extend(self.backend.as_ref().and_then(Backend::note));
         let rect =
             hud::show(ui, &snapshot, &self.settings, &mut self.seen_rows, &notes, &mut actions);
@@ -619,6 +761,14 @@ impl eframe::App for OverlayApp {
         };
         if let Some(request) = self.settings_window.show(&ctx, &mut self.settings, &info) {
             self.request_service(request);
+        }
+        let setup = setup_window::Context {
+            busy: self.service_task.is_some(),
+            status: self.setup_status.as_deref(),
+            monitors: self.monitor_count,
+        };
+        if let Some(choice) = self.setup_window.show(&ctx, &mut self.settings, &setup) {
+            self.apply_setup(choice);
         }
         // Изменения из окна настроек доходят до окна оверлея уже в этом кадре.
         self.sync(&ctx);

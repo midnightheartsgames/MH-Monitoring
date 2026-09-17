@@ -177,13 +177,17 @@ mod tests {
     }
 
     /// На любой Windows есть хотя бы программный адаптер; на машине разработчика — и настоящая
-    /// карта с именем и памятью.
+    /// карта с именем и памятью. У виртуального адаптера машины CI (GitHub Actions) нет ни
+    /// имени, ни памяти, и программным он себя не называет: имя проверяется только у карты с
+    /// памятью.
     #[test]
     fn adapters_are_listed_and_can_be_opened() {
         let list = adapters();
         assert!(!list.is_empty());
         for info in list.iter().filter(|info| !info.software) {
-            assert!(!info.name.is_empty(), "{info:?}");
+            if info.dedicated_memory_bytes > 0 {
+                assert!(!info.name.is_empty(), "{info:?}");
+            }
             let adapter = Adapter::open(info.luid).expect("адаптер из списка открывается");
             let _ = adapter.perf();
         }

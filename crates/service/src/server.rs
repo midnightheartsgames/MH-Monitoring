@@ -1,7 +1,7 @@
 //! Сервер снимков: движок и именованный канал (PLAN.md §6/P6).
 //!
-//! Один и тот же код работает внутри службы Windows и в отладочном режиме `MH-Monitoring.exe --serve`.
-//! UI выбирает цель сам и присылает её; сервер меряет и рассылает снимки.
+//! Один и тот же код работает внутри службы Windows и в отладочном режиме
+//! `MH-Monitoring-Service.exe --serve`. UI выбирает цель сам и присылает её; сервер меряет и рассылает снимки.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -10,10 +10,8 @@ use std::time::{Duration, Instant};
 use mh_core::{FpsReason, TargetResolution};
 use mh_engine::{Engine, EngineConfig, extract_presentmon};
 use mh_ipc::{PIPE_NAME, PROTOCOL_VERSION, ToClient, ToService, read_message, write_message};
+use mh_platform::diag;
 use mh_platform::pipe::{PipeListener, PipeStream, SERVICE_PIPE_SDDL};
-
-use crate::diag;
-use crate::settings;
 
 /// Как часто клиенту уходит снимок. UI обновляется с той же частотой, что и движок.
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(250);
@@ -24,7 +22,7 @@ const CLIENT_TICK: Duration = Duration::from_millis(20);
 pub fn run(stop: Arc<AtomicBool>) -> std::io::Result<()> {
     // Вложенный PresentMon — только из папки профиля, куда обычный пользователь не пишет: служба
     // запускает его от SYSTEM. Свой путь пользователя здесь не принимается вовсе.
-    let bin = settings::local_dir().join("bin");
+    let bin = crate::local_dir().join("bin");
     let presentmon = diag::timed("PresentMon разложен", || extract_presentmon(&bin))?;
     let engine = Arc::new(diag::timed("движок запущен", || {
         Engine::start(EngineConfig { presentmon, presentmon_override: None }, || {})

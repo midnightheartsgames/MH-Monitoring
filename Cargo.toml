@@ -1,15 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/engine", "crates/ipc", "crates/platform", "crates/sources", "crates/ui"]
+members = ["crates/core", "crates/engine", "crates/ipc", "crates/platform", "crates/service", "crates/sources", "crates/ui"]
 # Спайки — отдельные одноразовые крейты со своими зависимостями и своим Cargo.lock.
 # В рабочее пространство они не входят намеренно: `present-probe` тянет тяжёлый крейт
 # `windows`, который продукту не нужен.
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
+# Крейты не публикуются: дистрибутив — exe. Так же считает и `cargo deny` (пути без версий).
+publish = false
 repository = "https://github.com/midnightheartsgames/MH-Monitoring"
 
 [profile.release]

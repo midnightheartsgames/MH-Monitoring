@@ -1,4 +1,5 @@
-//! Запуск себя с правами администратора — для установки службы (PLAN.md §6/P6).
+//! Запуск себя с правами администратора — для установки службы (PLAN.md §6/P6) и для работы
+//! без службы «только в этот раз» (§6/P9).
 
 use std::io;
 use std::path::Path;
@@ -6,7 +7,7 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use crate::sys::wide;
 
@@ -39,4 +40,21 @@ pub fn run_elevated(executable: &Path, arguments: &str) -> io::Result<u32> {
         CloseHandle(process);
     }
     Ok(code)
+}
+
+/// Запускает `executable` через UAC и не ждёт его. Отказ в окне UAC — `ERROR_CANCELLED`.
+pub fn launch_elevated(executable: &Path, arguments: &str) -> io::Result<()> {
+    let verb = wide("runas");
+    let file = wide(&executable.to_string_lossy());
+    let parameters = wide(arguments);
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = parameters.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }

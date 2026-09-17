@@ -1,7 +1,8 @@
 //! Самоустановка: один exe ставит себя сам (PLAN.md §6/P7).
 //!
-//! `--install` (с правами администратора): копия в `Program Files\MH Monitoring`, служба на эту
-//! копию, ярлыки в «Пуске» и на рабочем столе, запись в «Программы и компоненты».
+//! `--install` (с правами администратора): копия в `Program Files\MH Monitoring`, рядом
+//! `MH-Monitoring-Service.exe` и служба на него, ярлыки в «Пуске» и на рабочем столе, запись в
+//! «Программы и компоненты».
 //! `--uninstall` — обратное; перед удалением спрашивает, удалять ли данные пользователя.
 //!
 //! Служба запускается от SYSTEM, поэтому её exe обязан лежать там, куда обычный пользователь не
@@ -59,6 +60,36 @@ pub fn install_dir() -> PathBuf {
 
 pub fn installed_exe() -> PathBuf {
     install_dir().join(EXE_NAME)
+}
+
+/// Служба рядом с программой — на неё и ставится служба Windows.
+pub fn installed_service_exe() -> PathBuf {
+    install_dir().join(mh_ipc::SERVICE_EXE_NAME)
+}
+
+/// `MH-Monitoring-Service.exe`, встроенный при сборке. Пустой — сборка без службы.
+static EMBEDDED_SERVICE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/service.bin"));
+
+/// Кладёт службу в `target`: из файла рядом с `source` (сборка, распакованный архив), иначе из
+/// встроенной копии.
+fn place_service(source: &Path, target: &Path) -> Result<(), String> {
+    let sibling = source.with_file_name(mh_ipc::SERVICE_EXE_NAME);
+    if same_path(&sibling, target) {
+        return if target.is_file() {
+            Ok(())
+        } else {
+            Err("нет файла службы".to_string())
+        };
+    }
+    if sibling.is_file() {
+        return copy_atomically(&sibling, target);
+    }
+    if EMBEDDED_SERVICE.is_empty() {
+        return Err(
+            r"в эту сборку служба не встроена — соберите через tools\build-release.ps1".to_string()
+        );
+    }
+    write_atomically(EMBEDDED_SERVICE, target)
 }
 
 /// Общее меню «Пуск» — для всех пользователей.
@@ -119,8 +150,10 @@ pub fn install() -> Result<(), String> {
         }
         copy_atomically(&source, &target)?;
     }
+    let service_target = installed_service_exe();
+    place_service(&source, &service_target)?;
     remove_legacy_files(&source);
-    service::install_at(&target)?;
+    service::install_at(&service_target)?;
 
     for link in shortcut_paths() {
         if let Err(error) = shortcut::create(&link, &target, "MH Monitoring — оверлей") {
@@ -337,8 +370,18 @@ pub fn set_autostart(enabled: bool) -> std::io::Result<()> {
 fn copy_atomically(source: &Path, target: &Path) -> Result<(), String> {
     let partial = target.with_extension("exe.partial");
     std::fs::copy(source, &partial).map_err(|e| format!("копирование: {e}"))?;
-    std::fs::rename(&partial, target).map_err(|e| {
-        let _ = std::fs::remove_file(&partial);
+    replace_with(&partial, target)
+}
+
+fn write_atomically(bytes: &[u8], target: &Path) -> Result<(), String> {
+    let partial = target.with_extension("exe.partial");
+    std::fs::write(&partial, bytes).map_err(|e| format!("запись {}: {e}", partial.display()))?;
+    replace_with(&partial, target)
+}
+
+fn replace_with(partial: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(partial, target).map_err(|e| {
+        let _ = std::fs::remove_file(partial);
         format!("замена {}: {e}", target.display())
     })
 }
@@ -410,5 +453,25 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
         assert!(!target.with_extension("exe.partial").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_service_is_taken_from_a_sibling_file_first() {
+        let dir = std::env::temp_dir().join(format!("mh-install-svc-{}", std::process::id()));
+        let target_dir = dir.join("installed");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let source = dir.join("MH-Monitoring.exe");
+        std::fs::write(dir.join(mh_ipc::SERVICE_EXE_NAME), b"service").unwrap();
+        let target = target_dir.join(mh_ipc::SERVICE_EXE_NAME);
+        place_service(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"service");
+        // Установленная копия переустанавливает себя: файл службы уже на месте.
+        place_service(&target_dir.join("MH-Monitoring.exe"), &target).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_installed_service_sits_next_to_the_program() {
+        assert_eq!(installed_service_exe().parent(), installed_exe().parent());
     }
 }
