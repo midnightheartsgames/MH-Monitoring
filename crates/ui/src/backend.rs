@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use mh_core::{Snapshot, TargetResolution};
+use mh_core::{SensorOptions, Snapshot, TargetResolution};
 use mh_engine::{Engine, EngineConfig};
 
 use crate::diag;
@@ -72,6 +72,24 @@ impl Backend {
         }
     }
 
+    pub fn set_sensor_options(&self, options: SensorOptions) {
+        match self {
+            Backend::Local(engine, _) => engine.set_sensor_options(options),
+            Backend::Remote(remote) => remote.set_sensor_options(options),
+        }
+    }
+
+    /// Применяется ли интервал опроса. Нет — только у службы старой версии.
+    pub fn sensor_options_supported(&self) -> bool {
+        match self {
+            Backend::Local(..) => true,
+            Backend::Remote(remote) => match remote.link() {
+                Link::Connected { sensor_options, .. } => sensor_options,
+                Link::Connecting | Link::Refused(_) => true,
+            },
+        }
+    }
+
     /// Строка для HUD о связи со службой — если сказать есть что.
     pub fn note(&self) -> Option<String> {
         match self {
@@ -94,7 +112,12 @@ impl Backend {
         match self {
             Backend::Local(..) => "движок в этом процессе".to_string(),
             Backend::Remote(remote) => match remote.link() {
-                Link::Connected { service_version } => format!("служба {service_version}"),
+                Link::Connected { service_version, sensor_options: true } => {
+                    format!("служба {service_version}")
+                }
+                Link::Connected { service_version, sensor_options: false } => {
+                    format!("служба {service_version} (старого протокола)")
+                }
                 Link::Connecting => "служба — нет связи".to_string(),
                 Link::Refused(reason) => format!("служба отказала: {reason}"),
             },

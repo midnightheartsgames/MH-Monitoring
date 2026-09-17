@@ -7,11 +7,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg_attr(not(windows), allow(dead_code))]
+mod blocks;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod format;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod games;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod placement;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod settings;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod units;
 
 #[cfg(windows)]
 mod app;
@@ -26,6 +32,8 @@ mod hud;
 #[cfg(windows)]
 mod installer;
 #[cfg(windows)]
+mod preview;
+#[cfg(windows)]
 mod remote;
 #[cfg(windows)]
 mod service;
@@ -34,7 +42,11 @@ mod settings_window;
 #[cfg(windows)]
 mod setup_window;
 #[cfg(windows)]
+mod strip;
+#[cfg(windows)]
 mod theme;
+#[cfg(windows)]
+mod widgets;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
