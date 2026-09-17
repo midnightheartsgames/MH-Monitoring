@@ -3,6 +3,7 @@ name = "mh-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Чистая логика MH Monitoring: статистика кадров, выбор цели, слияние телеметрии"
 
 # Зависимостей нет и не должно появиться без веской причины. Крейт обязан собираться и

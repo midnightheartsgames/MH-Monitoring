@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Текущая версия схемы. Меняется вместе с добавлением шага в [`migrate`].
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 /// Допустимые масштабы HUD.
 pub const SCALES: [f32; 4] = [0.75, 1.0, 1.25, 1.5];
@@ -40,6 +40,28 @@ pub struct OverlaySettings {
     pub always_on_top: bool,
     pub show_graph: bool,
     pub show_header: bool,
+    /// Что делать с HUD, пока игра в эксклюзивном полноэкранном режиме.
+    #[serde(deserialize_with = "lenient_fullscreen")]
+    pub fullscreen: FullscreenMode,
+}
+
+/// Поверх эксклюзивного полноэкранного режима окна не видны (PLAN.md §6/P9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FullscreenMode {
+    /// Спрятать HUD, пока игра в этом режиме.
+    #[default]
+    Hide,
+    /// Перенести HUD на монитор без игры; если он один — спрятать.
+    OtherMonitor,
+}
+
+/// Незнакомое значение от другой сборки — умолчание, а не карантин всего файла.
+fn lenient_fullscreen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<FullscreenMode, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(FullscreenMode::deserialize(value).unwrap_or_default())
 }
 
 impl Default for OverlaySettings {
@@ -54,6 +76,7 @@ impl Default for OverlaySettings {
             always_on_top: true,
             show_graph: true,
             show_header: true,
+            fullscreen: FullscreenMode::Hide,
         }
     }
 }
@@ -186,6 +209,23 @@ impl FpsSettings {
     }
 }
 
+/// Игра, которую программа запускает сама (PLAN.md §6/P10).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameProfile {
+    /// Имя в настройках и в `--launch "<имя>"`. Уникально.
+    pub name: String,
+    /// Что запускать: сама игра или её загрузчик.
+    pub path: String,
+    /// Параметры запуска, например `-window`.
+    pub arguments: String,
+    /// Снимать рамку с окна игры и растягивать его на монитор.
+    pub borderless: bool,
+    /// Файл, чьё окно делать без рамки, если это не `path`: загрузчик Warcraft III
+    /// `Frozen Throne.exe` запускает `war3.exe` и выходит.
+    pub window_exe: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeySettings {
@@ -208,6 +248,9 @@ pub struct Settings {
     pub metrics: MetricSettings,
     pub fps: FpsSettings,
     pub hotkeys: HotkeySettings,
+    /// Окно первого запуска пройдено: выбрана установка или работа без прав.
+    pub setup_done: bool,
+    pub games: Vec<GameProfile>,
 }
 
 impl Default for Settings {
@@ -219,6 +262,8 @@ impl Default for Settings {
             metrics: MetricSettings::default(),
             fps: FpsSettings::default(),
             hotkeys: HotkeySettings::default(),
+            setup_done: false,
+            games: Vec::new(),
         }
     }
 }
@@ -296,6 +341,18 @@ impl Settings {
             hotkeys.toggle_lock = default_hotkeys.toggle_lock;
         }
 
+        // Профиль без пути запускать нечего; имя нужно для `--launch`.
+        self.games.retain(|game| !game.path.trim().is_empty());
+        let mut names = BTreeSet::new();
+        for game in &mut self.games {
+            game.path = game.path.trim().to_string();
+            game.window_exe = non_blank(game.window_exe.take());
+            let base = crate::games::clean_name(&game.name)
+                .unwrap_or_else(|| crate::games::name_from_path(&game.path));
+            game.name = crate::games::unique_name(&base, |name| names.contains(name));
+            names.insert(game.name.to_lowercase());
+        }
+
         self.version = self.version.max(CURRENT_VERSION);
         self
     }
@@ -329,6 +386,12 @@ fn migrate(value: &mut Value, from: u32) {
     // их дают `serde(default)`. Нужна только метка версии.
     if from < 1 {
         value["version"] = Value::from(1);
+    }
+    // v1 → v2: окно первого запуска. Файл настроек уже есть — значит, программой пользовались,
+    // и окно им не нужно.
+    if from < 2 {
+        value["setup_done"] = Value::from(true);
+        value["version"] = Value::from(2);
     }
 }
 
@@ -577,6 +640,45 @@ mod tests {
         assert_eq!(target.mode, TargetMode::Manual);
         assert_eq!(target.manual_process.as_deref(), Some("dmc4.exe"));
         assert_eq!(target.manual_pid, Some(42));
+    }
+
+    #[test]
+    fn the_fullscreen_mode_survives_and_an_unknown_one_falls_back() {
+        let (settings, _) =
+            parse(r#"{ "overlay": { "fullscreen": "other_monitor" }, "setup_done": true }"#)
+                .unwrap();
+        assert_eq!(settings.overlay.fullscreen, FullscreenMode::OtherMonitor);
+        assert!(settings.setup_done);
+        let (settings, _) =
+            parse(r#"{ "overlay": { "fullscreen": "from_the_future", "locked": true } }"#).unwrap();
+        assert_eq!(settings.overlay.fullscreen, FullscreenMode::Hide);
+        assert!(settings.overlay.locked, "остальные поля не теряются");
+    }
+
+    #[test]
+    fn a_file_before_the_setup_window_counts_as_set_up() {
+        // Кто уже пользовался программой, окно первого запуска не видит.
+        let (settings, _) = parse(r#"{ "version": 1, "overlay": { "locked": true } }"#).unwrap();
+        assert!(settings.setup_done);
+    }
+
+    #[test]
+    fn game_profiles_are_repaired() {
+        let (settings, _) = parse(
+            r#"{ "games": [
+                { "name": "WC3", "path": " C:\\Games\\WC3\\Frozen Throne.exe ",
+                  "arguments": "-window", "borderless": true, "window_exe": "war3.exe" },
+                { "name": "wc3", "path": "C:\\Other\\wc3.exe" },
+                { "name": "без пути", "path": "  " },
+                { "path": "C:\\Games\\Doom\\doom.exe", "window_exe": " " }
+            ] }"#,
+        )
+        .unwrap();
+        let names: Vec<&str> = settings.games.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["WC3", "wc3 (2)", "doom"]);
+        assert_eq!(settings.games[0].path, r"C:\Games\WC3\Frozen Throne.exe");
+        assert!(settings.games[0].borderless);
+        assert_eq!(settings.games[2].window_exe, None);
     }
 
     #[test]

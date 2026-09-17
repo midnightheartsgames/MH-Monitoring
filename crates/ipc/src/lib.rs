@@ -15,6 +15,12 @@ use serde::{Deserialize, Serialize};
 /// Имя канала. Одно на машину: служба одна.
 pub const PIPE_NAME: &str = r"\\.\pipe\MHMonitor";
 
+/// Имя службы в SCM. Его знают и служба (диспетчер), и UI (установка, запуск, проверка).
+pub const SERVICE_NAME: &str = "MHMonitor";
+
+/// Файл службы рядом с `MH-Monitoring.exe` в папке установки.
+pub const SERVICE_EXE_NAME: &str = "MH-Monitoring-Service.exe";
+
 /// Меняется при любом несовместимом изменении сообщений.
 pub const PROTOCOL_VERSION: u32 = 1;
 

@@ -9,15 +9,16 @@
 //! Все координаты — физические пиксели экрана. Логические точки egui при разном DPI мониторов
 //! переводились бы по масштабу не того монитора.
 
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect, MonitorFromWindow,
 };
 use windows_sys::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST,
+    MONITORINFOF_PRIMARY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Работает ли сейчас приложение Direct3D в эксклюзивном полноэкранном режиме.
@@ -138,9 +139,120 @@ pub fn work_area_near(rect: ScreenRect) -> Option<ScreenRect> {
     Some(ScreenRect { left: work.left, top: work.top, right: work.right, bottom: work.bottom })
 }
 
+/// Монитор: весь прямоугольник, рабочая область, основной ли.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    pub bounds: ScreenRect,
+    pub work: ScreenRect,
+    pub primary: bool,
+}
+
+fn screen_rect(rect: RECT) -> ScreenRect {
+    ScreenRect { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+}
+
+fn monitor_info(monitor: HMONITOR) -> Option<Monitor> {
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return None;
+    }
+    Some(Monitor {
+        bounds: screen_rect(info.rcMonitor),
+        work: screen_rect(info.rcWork),
+        primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+    })
+}
+
+/// Все подключённые мониторы.
+pub fn monitors() -> Vec<Monitor> {
+    unsafe extern "system" fn collect(
+        monitor: HMONITOR,
+        _dc: HDC,
+        _rect: *mut RECT,
+        data: LPARAM,
+    ) -> windows_sys::core::BOOL {
+        // SAFETY: `data` — указатель на вектор из `monitors`, живой на время перечисления.
+        let list = unsafe { &mut *(data as *mut Vec<Monitor>) };
+        list.extend(monitor_info(monitor));
+        1
+    }
+    let mut list: Vec<Monitor> = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(collect),
+            &mut list as *mut Vec<Monitor> as LPARAM,
+        );
+    }
+    list
+}
+
+/// Монитор окна на переднем плане — в эксклюзивном полноэкранном режиме это монитор игры.
+pub fn foreground_monitor() -> Option<Monitor> {
+    let window = unsafe { GetForegroundWindow() };
+    if window.is_null() {
+        return None;
+    }
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONULL) };
+    if monitor.is_null() {
+        return None;
+    }
+    monitor_info(monitor)
+}
+
+/// Рабочая область монитора, на котором нет игры: основной, если игра не на нём, иначе первый
+/// подходящий. `None` — другого монитора нет.
+pub fn other_work_area(monitors: &[Monitor], game: ScreenRect) -> Option<ScreenRect> {
+    let others = monitors.iter().filter(|monitor| !intersects(monitor.bounds, game));
+    others.clone().find(|monitor| monitor.primary).or_else(|| others.clone().next()).map(|m| m.work)
+}
+
+fn intersects(a: ScreenRect, b: ScreenRect) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> ScreenRect {
+        ScreenRect { left, top, right, bottom }
+    }
+
+    fn monitor(bounds: ScreenRect, primary: bool) -> Monitor {
+        let work = ScreenRect { bottom: bounds.bottom - 40, ..bounds };
+        Monitor { bounds, work, primary }
+    }
+
+    #[test]
+    fn the_hud_goes_to_the_primary_monitor_when_the_game_is_elsewhere() {
+        let main = monitor(rect(0, 0, 2560, 1440), true);
+        let left = monitor(rect(-1920, 0, 0, 1080), false);
+        let right = monitor(rect(2560, 0, 4480, 1080), false);
+        assert_eq!(other_work_area(&[left, main, right], right.bounds), Some(main.work));
+    }
+
+    #[test]
+    fn the_hud_leaves_the_primary_monitor_when_the_game_is_there() {
+        let main = monitor(rect(0, 0, 2560, 1440), true);
+        let side = monitor(rect(-1920, 0, 0, 1080), false);
+        assert_eq!(other_work_area(&[main, side], main.bounds), Some(side.work));
+    }
+
+    #[test]
+    fn a_single_monitor_has_no_other_place() {
+        let main = monitor(rect(0, 0, 2560, 1440), true);
+        assert_eq!(other_work_area(&[main], main.bounds), None);
+    }
+
+    #[test]
+    fn this_machine_lists_at_least_one_monitor() {
+        let list = monitors();
+        assert!(!list.is_empty());
+        assert!(list.iter().any(|monitor| monitor.primary));
+    }
 
     #[test]
     fn the_primary_monitor_origin_is_visible_and_far_space_is_not() {

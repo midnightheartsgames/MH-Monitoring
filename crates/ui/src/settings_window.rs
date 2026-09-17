@@ -4,7 +4,8 @@
 //! черновиком и применяются кнопкой или Enter: иначе каждая набранная буква меняла бы цель и
 //! перезапускала захват.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui::{
     self, Color32, Pos2, RichText, ScrollArea, Slider, Ui, ViewportBuilder, ViewportClass,
@@ -13,7 +14,7 @@ use eframe::egui::{
 use mh_core::{FpsAvailability, SensorStatus, Snapshot};
 
 use crate::controls::parse_hotkey;
-use crate::settings::{Metric, SCALES, Settings, TargetChoice};
+use crate::settings::{FullscreenMode, Metric, SCALES, Settings, TargetChoice};
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -22,20 +23,29 @@ pub enum Page {
     Overlay,
     Rows,
     Fps,
+    Games,
     Hotkeys,
     Service,
     About,
 }
 
 impl Page {
-    const ALL: [Page; 6] =
-        [Page::Overlay, Page::Rows, Page::Fps, Page::Hotkeys, Page::Service, Page::About];
+    const ALL: [Page; 7] = [
+        Page::Overlay,
+        Page::Rows,
+        Page::Fps,
+        Page::Games,
+        Page::Hotkeys,
+        Page::Service,
+        Page::About,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Page::Overlay => "Оверлей",
             Page::Rows => "Строки",
             Page::Fps => "FPS",
+            Page::Games => "Игры",
             Page::Hotkeys => "Хоткеи",
             Page::Service => "Установка",
             Page::About => "О программе",
@@ -51,6 +61,8 @@ pub struct Drafts {
     pub presentmon_path: String,
     pub toggle_visibility: String,
     pub toggle_lock: String,
+    /// Путь к игре, которую добавляют.
+    pub game_path: String,
 }
 
 impl Drafts {
@@ -61,6 +73,7 @@ impl Drafts {
             presentmon_path: settings.fps.presentmon_path.clone().unwrap_or_default(),
             toggle_visibility: settings.hotkeys.toggle_visibility.clone(),
             toggle_lock: settings.hotkeys.toggle_lock.clone(),
+            game_path: String::new(),
         }
     }
 
@@ -175,6 +188,8 @@ pub struct SettingsWindow {
     position: Option<Pos2>,
     /// Вывести окно вперёд на ближайшем кадре: открыли из трея или хоткеем поверх игры.
     focus_pending: bool,
+    /// Открыт диалог выбора файла игры; ответ придёт сюда.
+    picking: Option<Receiver<Option<PathBuf>>>,
 }
 
 /// Размер окна настроек в точках.
@@ -245,6 +260,7 @@ impl SettingsWindow {
                     Page::Overlay => overlay_page(ui, settings),
                     Page::Rows => rows_page(ui, settings),
                     Page::Fps => self.fps_page(ui, settings, info),
+                    Page::Games => self.games_page(ui, settings),
                     Page::Hotkeys => self.hotkeys_page(ui, settings, info),
                     Page::Service => request = self.service_page(ui, info),
                     Page::About => about_page(ui, info),
@@ -282,8 +298,9 @@ impl SettingsWindow {
         hint(
             ui,
             &format!(
-                "Установка копирует программу в {} и ставит службу: захват кадров и температура \
-                 CPU работают без прав администратора. Подтверждение UAC спросят один раз.",
+                "Установка копирует программу в {} и ставит службу (отдельный \
+                 MH-Monitoring-Service.exe): захват кадров и температура CPU работают без прав \
+                 администратора. Подтверждение UAC спросят один раз.",
                 crate::installer::install_dir().display()
             ),
         );
@@ -345,7 +362,7 @@ impl SettingsWindow {
                         self.install_state = None;
                     }
                 }
-                if !crate::installer::same_path(path, &crate::installer::installed_exe()) {
+                if !crate::installer::same_path(path, &crate::installer::installed_service_exe()) {
                     warning(
                         ui,
                         "Служба стоит не на установленной копии. Если этот файл лежит там, куда \
@@ -379,7 +396,7 @@ impl SettingsWindow {
             // Сырые слова источника — здесь, в диагностике, а не в HUD.
             hint(ui, detail);
         }
-        hint(ui, "Для захвата кадров нужны права администратора.");
+        hint(ui, "Для захвата кадров нужна служба («Установка») или права администратора.");
 
         group(ui, "Цель");
         let fps = &mut settings.fps;
@@ -419,6 +436,127 @@ impl SettingsWindow {
             self.report(Page::Fps, result, "путь сохранён");
         }
         self.status_line(ui, Page::Fps);
+    }
+
+    fn games_page(&mut self, ui: &mut Ui, settings: &mut Settings) {
+        self.poll_picker(settings);
+
+        group(ui, "Старые игры без безрамочного режима");
+        hint(
+            ui,
+            "MH Monitoring запускает игру с параметрами (у Warcraft III 1.26 — -window) и, если \
+             отмечено, снимает с окна игры рамку и растягивает его на весь монитор. HUD тогда \
+             виден поверх игры. В игру ничего не внедряется: меняется только её окно.",
+        );
+        hint(
+            ui,
+            "Ярлык на рабочем столе запускает игру вместе с оверлеем. Картинка игры 4:3 на \
+             широком мониторе растягивается.",
+        );
+
+        enum Action {
+            Launch(usize),
+            Shortcut(usize),
+            Remove(usize),
+        }
+        let mut action = None;
+        if settings.games.is_empty() {
+            note(ui, "Игр пока нет.");
+        }
+        for (index, game) in settings.games.iter_mut().enumerate() {
+            ui.push_id(index, |ui| {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(&game.name).font(theme::bold(15.0)).color(theme::TEXT_PRIMARY),
+                );
+                hint(ui, &game.path);
+                ui.horizontal(|ui| {
+                    ui.label("Параметры:");
+                    ui.add(egui::TextEdit::singleline(&mut game.arguments).desired_width(260.0));
+                });
+                ui.checkbox(&mut game.borderless, "Без рамки на весь монитор");
+                if let Some(window) = &game.window_exe {
+                    hint(ui, &format!("Рамка снимается с окна {window}."));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Запустить").clicked() {
+                        action = Some(Action::Launch(index));
+                    }
+                    if ui.button("Ярлык на рабочем столе").clicked() {
+                        action = Some(Action::Shortcut(index));
+                    }
+                    if ui.button("Удалить").clicked() {
+                        action = Some(Action::Remove(index));
+                    }
+                });
+            });
+        }
+        match action {
+            Some(Action::Launch(index)) => {
+                let result = crate::games::launch(&settings.games[index]);
+                self.report(Page::Games, result, "игра запущена");
+            }
+            Some(Action::Shortcut(index)) => {
+                let result = crate::games::create_desktop_shortcut(&settings.games[index]);
+                let text = match &result {
+                    Ok(link) => format!("ярлык создан: {}", link.display()),
+                    Err(_) => String::new(),
+                };
+                self.report(Page::Games, result.map(|_| ()), &text);
+            }
+            Some(Action::Remove(index)) => {
+                let removed = settings.games.remove(index);
+                self.report(Page::Games, Ok(()), &format!("удалено: {}", removed.name));
+            }
+            None => {}
+        }
+
+        group(ui, "Добавить игру");
+        ui.add_enabled_ui(self.picking.is_none(), |ui| {
+            if ui.button("Выбрать файл игры…").clicked() {
+                let (sender, receiver) = mpsc::channel();
+                let repaint = ui.ctx().clone();
+                let spawned =
+                    std::thread::Builder::new().name("mh-pick-game".into()).spawn(move || {
+                        let picked = mh_platform::dialog::pick_executable("Файл игры");
+                        let _ = sender.send(picked);
+                        repaint.request_repaint_of(ViewportId::ROOT);
+                    });
+                if spawned.is_ok() {
+                    self.picking = Some(receiver);
+                }
+            }
+        });
+        text_field(ui, "Или путь к .exe", &mut self.drafts.game_path, r"C:\Games\game.exe");
+        ui.add_space(4.0);
+        if ui.button("Добавить").clicked() {
+            let path = PathBuf::from(self.drafts.game_path.trim().trim_matches('"'));
+            if self.add_game(settings, &path) {
+                self.drafts.game_path.clear();
+            }
+        }
+        self.status_line(ui, Page::Games);
+    }
+
+    fn poll_picker(&mut self, settings: &mut Settings) {
+        let Some(receiver) = &self.picking else { return };
+        match receiver.try_recv() {
+            Ok(Some(path)) => {
+                self.picking = None;
+                self.add_game(settings, &path);
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => self.picking = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Добавляет профиль игры. `false` — файл не подошёл, причина в строке состояния.
+    fn add_game(&mut self, settings: &mut Settings, path: &Path) -> bool {
+        let result = add_game(settings, path);
+        let added = result.is_ok();
+        let text = result.as_ref().cloned().unwrap_or_default();
+        self.report(Page::Games, result.map(|_| ()), &text);
+        added
     }
 
     fn hotkeys_page(&mut self, ui: &mut Ui, settings: &mut Settings, info: &Context<'_>) {
@@ -464,6 +602,26 @@ impl SettingsWindow {
     }
 }
 
+/// Профиль для `path`. `Ok` — что сказать пользователю.
+fn add_game(settings: &mut Settings, path: &Path) -> Result<String, String> {
+    if path.as_os_str().is_empty() {
+        return Err("укажите файл игры".to_string());
+    }
+    let is_exe = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+    if !is_exe || !path.is_file() {
+        return Err(format!("это не файл .exe: {}", path.display()));
+    }
+    let names: Vec<String> = settings.games.iter().map(|game| game.name.to_lowercase()).collect();
+    let profile = crate::games::profile_for(path, |name| names.iter().any(|taken| taken == name));
+    let text = if profile.arguments.is_empty() {
+        format!("добавлено: {}", profile.name)
+    } else {
+        format!("добавлено: {}; параметры {} подставлены", profile.name, profile.arguments)
+    };
+    settings.games.push(profile);
+    Ok(text)
+}
+
 fn overlay_page(ui: &mut Ui, settings: &mut Settings) {
     let overlay = &mut settings.overlay;
     group(ui, "Окно");
@@ -489,6 +647,20 @@ fn overlay_page(ui: &mut Ui, settings: &mut Settings) {
 
     group(ui, "График");
     ui.checkbox(&mut overlay.show_graph, "График frametime");
+
+    group(ui, "Эксклюзивный полноэкранный режим");
+    ui.radio_value(&mut overlay.fullscreen, FullscreenMode::Hide, "Скрывать HUD");
+    ui.radio_value(
+        &mut overlay.fullscreen,
+        FullscreenMode::OtherMonitor,
+        "Переносить HUD на другой монитор",
+    );
+    hint(
+        ui,
+        "Поверх игры в этом режиме окна не видны, а перекрытая игра может перестать рисовать. \
+         На время режима HUD уходит с её монитора; без второго монитора — прячется. Надёжнее \
+         всего — безрамочный режим в самой игре.",
+    );
 }
 
 fn rows_page(ui: &mut Ui, settings: &mut Settings) {
@@ -585,21 +757,21 @@ fn status_text(status: SensorStatus) -> &'static str {
     }
 }
 
-fn group(ui: &mut Ui, title: &str) {
+pub(crate) fn group(ui: &mut Ui, title: &str) {
     ui.add_space(12.0);
     ui.label(RichText::new(title).font(theme::bold(16.0)).color(theme::TEXT_PRIMARY));
     ui.add_space(4.0);
 }
 
-fn note(ui: &mut Ui, text: &str) {
+pub(crate) fn note(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::TEXT_SECONDARY));
 }
 
-fn hint(ui: &mut Ui, text: &str) {
+pub(crate) fn hint(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).font(theme::regular(12.0)).color(theme::TEXT_DISABLED));
 }
 
-fn warning(ui: &mut Ui, text: &str) {
+pub(crate) fn warning(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::ACCENT_WARN));
 }
 
@@ -679,6 +851,20 @@ mod tests {
 
         Drafts::default().apply_presentmon(&mut settings).unwrap();
         assert_eq!(settings.fps.presentmon_path, None);
+    }
+
+    #[test]
+    fn only_existing_executables_become_games() {
+        let mut settings = Settings::default();
+        assert!(add_game(&mut settings, Path::new("")).is_err());
+        assert!(add_game(&mut settings, Path::new(r"C:\no\such\game.exe")).is_err());
+        assert!(add_game(&mut settings, &std::env::temp_dir()).is_err());
+
+        let this_exe = std::env::current_exe().unwrap();
+        add_game(&mut settings, &this_exe).unwrap();
+        add_game(&mut settings, &this_exe).unwrap();
+        assert_eq!(settings.games.len(), 2);
+        assert_ne!(settings.games[0].name, settings.games[1].name, "имена не повторяются");
     }
 
     #[test]

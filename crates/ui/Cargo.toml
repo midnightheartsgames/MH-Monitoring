@@ -3,6 +3,7 @@ name = "mh-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "MH Monitoring: оверлей, трей, хоткеи"
 
 build = "build.rs"

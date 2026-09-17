@@ -54,6 +54,10 @@ impl Backend {
         matches!(self, Backend::Local(..))
     }
 
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Backend::Remote(..))
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         match self {
             Backend::Local(engine, _) => engine.snapshot(),

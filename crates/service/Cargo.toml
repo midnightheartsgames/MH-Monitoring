@@ -1,0 +1,26 @@
+[package]
+name = "mh-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "MH Monitoring: служба Windows — захват кадров и датчиков от SYSTEM"
+
+build = "build.rs"
+
+# Отдельный бинарник, а не режим `MH-Monitoring.exe`: от SYSTEM работает только то, что нужно
+# для замера. Ни eframe, ни winit, ни трея здесь нет — меньше чужого кода с правами системы
+# (PLAN.md §6/P9).
+[[bin]]
+name = "MH-Monitoring-Service"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+mh-core = { path = "../core" }
+mh-engine = { path = "../engine" }
+mh-ipc = { path = "../ipc" }
+mh-platform = { path = "../platform" }
+windows-service = "0.8"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
