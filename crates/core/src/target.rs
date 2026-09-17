@@ -50,6 +50,7 @@ pub fn is_shell_process(executable: &str) -> bool {
 
 /// Откуда берётся цель.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TargetMode {
     /// Из окна в фокусе.
     #[default]
@@ -60,6 +61,7 @@ pub enum TargetMode {
 
 /// Настройки выбора цели.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TargetSettings {
     pub mode: TargetMode,
     /// Имя exe для ручного режима.
@@ -84,6 +86,7 @@ impl TargetSettings {
 
 /// Чем закончился один опрос.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TargetResolution {
     Resolved(TargetProcess),
     Unresolved { reason: FpsReason, detail: Option<String> },

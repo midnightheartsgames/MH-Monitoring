@@ -7,12 +7,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use mh_core::{
-    Aggregator, GraphBuilder, Millis, SampleTier, Snapshot, TargetResolution, TargetSettings,
-    TargetTracker, session_name,
+    Aggregator, FpsReason, GraphBuilder, Millis, SampleTier, Snapshot, TargetResolution,
+    session_name,
 };
 use mh_platform::etw::{install_panic_cleanup, stop_by_name, sweep_orphans};
 use mh_platform::job::KillOnCloseJob;
-use mh_platform::process::{SystemProcessLookup, foreground_process};
 use mh_sources::clock::{Clock, MonotonicClock};
 use mh_sources::frames::capture::FrameCapture;
 use mh_sources::frames::etw_dxgi::source::EtwFactory;
@@ -32,14 +31,15 @@ pub struct EngineConfig {
     pub presentmon: PathBuf,
     /// Свой PresentMon пользователя, если задан.
     pub presentmon_override: Option<PathBuf>,
-    pub target: TargetSettings,
 }
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
 struct Shared {
     aggregator: Mutex<Aggregator>,
-    target: Mutex<TargetSettings>,
+    /// Кого мерить. Решает не движок: в службе нет окна в фокусе (сессия 0), поэтому цель
+    /// выбирает UI — через [`crate::TargetWatcher`] — и присылает готовой.
+    target: Mutex<TargetResolution>,
     stop: AtomicBool,
     clock: Arc<dyn Clock>,
     notify: Notify,
@@ -83,7 +83,7 @@ impl Engine {
 
         let shared = Arc::new(Shared {
             aggregator: Mutex::new(Aggregator::new()),
-            target: Mutex::new(config.target.clone()),
+            target: Mutex::new(no_target()),
             stop: AtomicBool::new(false),
             clock: MonotonicClock::shared(),
             notify: Arc::new(notify),
@@ -113,7 +113,7 @@ impl Engine {
         self.shared.aggregator().snapshot(now)
     }
 
-    pub fn set_target(&self, target: TargetSettings) {
+    pub fn set_target(&self, target: TargetResolution) {
         *self.shared.target.lock().unwrap_or_else(|e| e.into_inner()) = target;
     }
 }
@@ -151,15 +151,10 @@ fn hardware_loop(shared: &Shared) {
 }
 
 fn frames_loop(shared: &Shared, mut capture: FrameCapture) {
-    let own_pid = std::process::id();
-    let lookup = SystemProcessLookup;
-    let mut tracker = TargetTracker::new();
     let mut graph = GraphBuilder::new();
     loop {
         let now = shared.clock.now_ms();
-        let settings = shared.target.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let foreground = foreground_process(own_pid);
-        let resolution = tracker.resolve(now, foreground.as_ref(), &settings, &lookup);
+        let resolution = shared.target.lock().unwrap_or_else(|e| e.into_inner()).clone();
         capture.set_target(resolution.target());
         let mut state = capture.poll(now);
         // Цель не выбрана: объясняем словами трекера, а не общим «жду игру».
@@ -183,6 +178,10 @@ fn frames_loop(shared: &Shared, mut capture: FrameCapture) {
             return;
         }
     }
+}
+
+fn no_target() -> TargetResolution {
+    TargetResolution::Unresolved { reason: FpsReason::NoTarget, detail: None }
 }
 
 fn build_capture(

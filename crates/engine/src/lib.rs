@@ -8,8 +8,12 @@
 mod bundle;
 #[cfg(windows)]
 mod engine;
+#[cfg(windows)]
+mod watcher;
 
 #[cfg(windows)]
 pub use bundle::extract_presentmon;
 #[cfg(windows)]
 pub use engine::{Engine, EngineConfig};
+#[cfg(windows)]
+pub use watcher::TargetWatcher;

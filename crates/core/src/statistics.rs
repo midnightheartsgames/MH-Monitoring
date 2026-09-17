@@ -18,6 +18,7 @@ pub const MIN_SAMPLES_0_1_PERCENT: usize = 1_000;
 /// Всё, чего может не быть, — `None`, а не ноль: отсутствующая цифра и цифра «ноль» означают
 /// разное, и UI обязан их различать.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FrameStatistics {
     /// FPS за последние [`CURRENT_WINDOW_MS`] — число для HUD. Покадровую картину даёт график.
     pub current_fps: Option<f64>,

@@ -16,6 +16,8 @@
 #[cfg(windows)]
 pub mod console;
 #[cfg(windows)]
+pub mod elevate;
+#[cfg(windows)]
 pub mod etw;
 #[cfg(windows)]
 pub mod job;
@@ -25,6 +27,8 @@ pub mod overlay;
 pub mod pawnio;
 #[cfg(windows)]
 pub mod pdh;
+#[cfg(windows)]
+pub mod pipe;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]

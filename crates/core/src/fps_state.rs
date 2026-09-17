@@ -13,6 +13,7 @@ use crate::statistics::FrameStatistics;
 /// Имя — не идентичность. Windows быстро переиспользует PID, а две копии одного exe — это две
 /// разные игры. Идентичностью служит пара «PID + время старта» (PLAN.md §6/P1).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TargetProcess {
     pub pid: u32,
     pub executable: String,
@@ -51,6 +52,7 @@ impl std::fmt::Display for TargetProcess {
 
 /// Насколько источник кадров реально работает.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FpsAvailability {
     /// Ещё ничего не решено; только между созданием и первым опросом.
     #[default]
@@ -80,6 +82,7 @@ impl FpsAvailability {
 /// надо уметь сопоставить с состоянием. Именно это позволило в старом проекте локализовать
 /// чужую поломку за две минуты вместо гадания.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FpsReason {
     Starting,
     Simulated,
@@ -144,6 +147,7 @@ impl std::fmt::Display for FpsReason {
 
 /// Всё, что остальному приложению нужно знать о кадрах, — одним значением.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FpsState {
     pub availability: FpsAvailability,
     pub reason: Option<FpsReason>,

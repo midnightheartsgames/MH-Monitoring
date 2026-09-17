@@ -6,15 +6,16 @@ use std::time::{Duration, Instant};
 use eframe::egui::{
     self, Id, Pos2, Rect, Sense, Vec2, ViewportBuilder, ViewportCommand, WindowLevel, pos2,
 };
-use mh_engine::{Engine, EngineConfig, extract_presentmon};
+use mh_engine::{TargetWatcher, extract_presentmon};
 use mh_platform::overlay::{OverlayWindow, ScreenRect, is_on_any_monitor, work_area_near};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+use crate::backend::{Backend, LocalConfig};
 use crate::controls::{Command, Controls};
 use crate::diag;
 use crate::hud::{self, HudActions, SeenRows};
 use crate::settings::{self, Settings};
-use crate::settings_window::{self, SettingsWindow};
+use crate::settings_window::{self, ServiceRequest, SettingsWindow};
 use crate::theme;
 
 /// Как часто оверлей снова забирает верх z-порядка и проверяет своё место на экране.
@@ -23,6 +24,10 @@ const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 /// Куда ставить HUD, если сохранённой позиции нет или она на отключённом мониторе.
 const DEFAULT_POSITION: (i32, i32) = (20, 20);
+/// Как часто UI выбирает цель — с той же частотой, что опрашивает кадры движок.
+const TARGET_EVERY: Duration = Duration::from_millis(250);
+/// Как часто UI без службы проверяет, не появилась ли она.
+const SERVICE_CHECK_EVERY: Duration = Duration::from_secs(3);
 /// Оценка размера окна для проверки позиции до первого кадра, в физических пикселях.
 const ESTIMATED_SIZE: (i32, i32) = (272, 420);
 
@@ -79,7 +84,6 @@ struct Applied {
     locked: bool,
     always_on_top: bool,
     scale: f32,
-    target: mh_core::TargetSettings,
 }
 
 impl Applied {
@@ -89,14 +93,22 @@ impl Applied {
             locked: settings.overlay.locked,
             always_on_top: settings.overlay.always_on_top,
             scale: settings.overlay.scale,
-            target: settings.fps.target_settings(),
         }
     }
 }
 
 struct OverlayApp {
     /// `None` после выхода: движок останавливается явно, в `on_exit`.
-    engine: Option<Engine>,
+    backend: Option<Backend>,
+    local: LocalConfig,
+    /// Цель выбирает UI: у службы нет окна в фокусе.
+    watcher: TargetWatcher,
+    next_target: Instant,
+    next_service_check: Instant,
+    /// Установка или удаление службы — идёт в фоне, пока пользователь отвечает UAC.
+    service_task: Option<std::thread::JoinHandle<Result<(), String>>>,
+    /// Итог последней операции со службой — для окна настроек.
+    service_status: Option<String>,
     settings: Settings,
     /// Настройки на момент последней записи — чтобы писать только изменения.
     saved: Settings,
@@ -116,6 +128,9 @@ struct OverlayApp {
     notes: Vec<String>,
     /// Последнее записанное в журнал состояние кадров — пишем только перемены.
     logged_fps: String,
+    /// После удаления службы — перейти на свой движок.
+    pending_local: bool,
+    started: Instant,
     /// Масштаб экрана под HUD — для перевода физических пикселей в точки egui.
     pixels_per_point: f32,
     exiting: bool,
@@ -155,17 +170,11 @@ impl OverlayApp {
         let mut notes: Vec<String> = notice.into_iter().collect();
         notes.extend(controls.hotkey_errors.iter().cloned());
 
-        let repaint = ctx.clone();
-        let engine = diag::timed("движок запущен", || {
-            Engine::start(
-                EngineConfig {
-                    presentmon,
-                    presentmon_override: settings.fps.presentmon_path.as_ref().map(PathBuf::from),
-                    target: settings.fps.target_settings(),
-                },
-                move || repaint.request_repaint_of(egui::ViewportId::ROOT),
-            )
-        });
+        let local = LocalConfig {
+            presentmon,
+            presentmon_override: settings.fps.presentmon_path.as_ref().map(PathBuf::from),
+        };
+        let backend = Backend::start(ctx, &local);
 
         let mut settings_window = SettingsWindow::default();
         // `mh-monitor --settings` — сразу с открытыми настройками (ярлык, проверка).
@@ -179,7 +188,13 @@ impl OverlayApp {
         }
 
         Self {
-            engine: Some(engine),
+            backend: Some(backend),
+            local,
+            watcher: TargetWatcher::new(),
+            next_target: Instant::now(),
+            next_service_check: Instant::now() + SERVICE_CHECK_EVERY,
+            service_task: None,
+            service_status: None,
             saved: settings.clone(),
             settings,
             settings_path,
@@ -194,6 +209,8 @@ impl OverlayApp {
             seen_rows: SeenRows::new(),
             notes,
             logged_fps: String::new(),
+            pending_local: false,
+            started: Instant::now(),
             pixels_per_point: cc.egui_ctx.pixels_per_point(),
             exiting: false,
         }
@@ -253,11 +270,6 @@ impl OverlayApp {
             ctx.set_zoom_factor(wanted.scale);
             self.last_size = None;
         }
-        if previous.as_ref().map(|a| &a.target) != Some(&wanted.target)
-            && let Some(engine) = &self.engine
-        {
-            engine.set_target(wanted.target.clone());
-        }
         self.controls.sync_menu(wanted.visible, wanted.locked);
         // winit только что мог переписать расширенный стиль — вернуть наши биты при ближайшей уборке.
         self.next_housekeeping = Instant::now();
@@ -286,6 +298,81 @@ impl OverlayApp {
         }
         self.settings.overlay.x = Some(rect.left);
         self.settings.overlay.y = Some(rect.top);
+    }
+
+    /// Выбирает цель и отдаёт её движку — своему или службе.
+    fn update_target(&mut self) {
+        let now = Instant::now();
+        if now < self.next_target {
+            return;
+        }
+        self.next_target = now + TARGET_EVERY;
+        let Some(backend) = &self.backend else { return };
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let resolution = self.watcher.resolve(now_ms, &self.settings.fps.target_settings());
+        backend.set_target(resolution);
+    }
+
+    /// Появилась служба — переходим на неё: свой движок без прав видит меньше.
+    fn check_service(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if now < self.next_service_check {
+            return;
+        }
+        self.next_service_check = now + SERVICE_CHECK_EVERY;
+        if self.backend.as_ref().is_some_and(Backend::is_local)
+            && crate::remote::RemoteEngine::service_available()
+        {
+            diag::log("служба появилась — переход на неё");
+            // Сначала свой движок: две ETW-сессии на одну игру ни к чему.
+            drop(self.backend.take());
+            self.backend = Some(Backend::start(ctx, &self.local));
+        }
+    }
+
+    fn request_service(&mut self, request: ServiceRequest) {
+        if self.service_task.is_some() {
+            return;
+        }
+        let argument = match request {
+            ServiceRequest::Install => "--install-service",
+            ServiceRequest::Uninstall => "--uninstall-service",
+        };
+        diag::log(format!("служба: запрос {argument}"));
+        self.service_status = Some("ожидание подтверждения UAC…".to_string());
+        self.service_task = Some(std::thread::spawn(move || {
+            let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+            match mh_platform::elevate::run_elevated(&executable, argument) {
+                Ok(0) => Ok(()),
+                Ok(code) => Err(format!("завершилось с кодом {code}")),
+                Err(error) => Err(error.to_string()),
+            }
+        }));
+        if request == ServiceRequest::Uninstall {
+            // Служба уходит — свой движок сразу, не дожидаясь разрыва.
+            self.pending_local = true;
+        }
+    }
+
+    fn poll_service_task(&mut self, ctx: &egui::Context) {
+        if !self.service_task.as_ref().is_some_and(|task| task.is_finished()) {
+            return;
+        }
+        let result = self.service_task.take().map(|task| task.join());
+        let text = match result {
+            Some(Ok(Ok(()))) => "готово".to_string(),
+            Some(Ok(Err(error))) => format!("не удалось: {error}"),
+            _ => "не удалось".to_string(),
+        };
+        diag::log(format!("служба: {text}"));
+        self.service_status = Some(text);
+        self.next_service_check = Instant::now();
+        if std::mem::take(&mut self.pending_local)
+            && !self.backend.as_ref().is_some_and(Backend::is_local)
+        {
+            drop(self.backend.take());
+            self.backend = Some(Backend::start_local(ctx, &self.local));
+        }
     }
 
     fn log_fps(&mut self, snapshot: &mh_core::Snapshot) {
@@ -336,6 +423,9 @@ impl eframe::App for OverlayApp {
             self.apply(Command::ToggleVisible);
         }
         self.sync(ctx);
+        self.update_target();
+        self.check_service(ctx);
+        self.poll_service_task(ctx);
         self.housekeeping();
         self.save_if_due(self.exiting);
         if self.exiting {
@@ -345,7 +435,7 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let snapshot = self.engine.as_ref().map(Engine::snapshot).unwrap_or_default();
+        let snapshot = self.backend.as_ref().map(Backend::snapshot).unwrap_or_default();
 
         // Область перетаскивания — до содержимого, чтобы кнопки заголовка лежали поверх неё.
         if !self.settings.overlay.locked
@@ -358,14 +448,10 @@ impl eframe::App for OverlayApp {
         self.log_fps(&snapshot);
 
         let mut actions = HudActions::default();
-        let rect = hud::show(
-            ui,
-            &snapshot,
-            &self.settings,
-            &mut self.seen_rows,
-            &self.notes,
-            &mut actions,
-        );
+        let mut notes = self.notes.clone();
+        notes.extend(self.backend.as_ref().and_then(Backend::note));
+        let rect =
+            hud::show(ui, &snapshot, &self.settings, &mut self.seen_rows, &notes, &mut actions);
         self.hud_rect = Some(rect);
 
         // Окно повторяет размер HUD: высота зависит от того, какие строки есть. Размер в точках
@@ -388,12 +474,18 @@ impl eframe::App for OverlayApp {
             self.apply(Command::ToggleVisible);
         }
 
+        let backend = self.backend.as_ref().map(Backend::describe).unwrap_or_default();
         let info = settings_window::Context {
             snapshot: &snapshot,
             settings_path: &self.settings_path,
             hotkey_errors: &self.controls.hotkey_errors,
+            backend: &backend,
+            service_status: self.service_status.as_deref(),
+            service_busy: self.service_task.is_some(),
         };
-        self.settings_window.show(&ctx, &mut self.settings, &info);
+        if let Some(request) = self.settings_window.show(&ctx, &mut self.settings, &info) {
+            self.request_service(request);
+        }
         // Изменения из окна настроек доходят до окна оверлея уже в этом кадре.
         self.sync(&ctx);
     }
@@ -407,8 +499,8 @@ impl eframe::App for OverlayApp {
         diag::timed("настройки записаны", || self.save_if_due(true));
         // Остановка захвата — здесь, а не когда-нибудь в Drop: гарантий, что eframe уничтожит
         // приложение до выхода процесса, нет, а незакрытая ETW-сессия ломает захват всей машине.
-        let engine = self.engine.take();
-        diag::timed("движок остановлен", || drop(engine));
+        let backend = self.backend.take();
+        diag::timed("движок остановлен", || drop(backend));
     }
 }
 
@@ -502,13 +594,13 @@ mod tests {
     }
 
     #[test]
-    fn applied_state_follows_the_settings() {
+    fn applied_state_follows_the_window_settings_only() {
         let mut settings = Settings::default();
         let before = Applied::of(&settings);
+        // Цель окно не трогает: её выбирает `TargetWatcher` на каждом шаге.
         settings.fps.target = settings::TargetChoice::Manual;
-        settings.fps.manual_process = Some("dmc4.exe".into());
-        let after = Applied::of(&settings);
-        assert_ne!(before.target, after.target);
-        assert_eq!(before.visible, after.visible);
+        assert_eq!(Applied::of(&settings), before);
+        settings.overlay.locked = true;
+        assert_ne!(Applied::of(&settings), before);
     }
 }

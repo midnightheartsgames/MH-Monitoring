@@ -25,6 +25,7 @@ const LOWER_BELOW: f32 = 0.7;
 
 /// Готовая к рисованию картинка.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FrametimeGraph {
     /// Пик frametime в каждом столбце, старейший слева. `0.0` — в столбце кадров нет.
     pub columns: Vec<f32>,

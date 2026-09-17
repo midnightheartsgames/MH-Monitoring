@@ -1,0 +1,11 @@
+[package]
+name = "mh-ipc"
+version.workspace = true
+edition.workspace = true
+description = "Протокол служба ↔ UI MH Monitor: сообщения и их упаковка"
+
+# Чистый крейт: ни Windows, ни каналов. Транспорт — `mh-platform::pipe`.
+[dependencies]
+mh-core = { path = "../core", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -10,6 +10,7 @@ use crate::graph::FrametimeGraph;
 
 /// Здоровье источника данных. Источник, который деградировал, не должен ронять приложение.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SensorStatus {
     /// Ещё не инициализирован.
     #[default]
@@ -52,6 +53,7 @@ impl SensorStatus {
 /// Коды, а не свободный текст, — по тем же причинам, что и у кадров: одна ситуация обязана
 /// читаться одинаково, и прочерк в HUD без объяснения запрещён планом (PLAN.md §6/P3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SensorReason {
     /// `nvml.dll` не найдена — драйвер NVIDIA не установлен.
     GpuDriverMissing,
@@ -91,6 +93,7 @@ impl std::fmt::Display for SensorReason {
 
 /// Здоровье одной секции HUD: насколько она заполнена и почему не целиком.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SectionHealth {
     pub status: SensorStatus,
     pub reason: Option<SensorReason>,
@@ -129,6 +132,7 @@ impl SectionHealth {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GpuStats {
     pub health: SectionHealth,
     pub name: Option<String>,
@@ -155,6 +159,7 @@ impl GpuStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CpuStats {
     pub health: SectionHealth,
     pub name: Option<String>,
@@ -175,6 +180,7 @@ impl CpuStats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemoryStats {
     pub health: SectionHealth,
     pub used_bytes: Option<u64>,
@@ -198,6 +204,7 @@ impl MemoryStats {
 
 /// Единственное неизменяемое состояние, на которое подписан UI.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Snapshot {
     pub gpu: GpuStats,
     pub cpu: CpuStats,

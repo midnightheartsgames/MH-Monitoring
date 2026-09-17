@@ -14,19 +14,67 @@ mod settings;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod backend;
+#[cfg(windows)]
 mod controls;
 #[cfg(windows)]
 mod diag;
 #[cfg(windows)]
 mod hud;
 #[cfg(windows)]
+mod remote;
+#[cfg(windows)]
+mod server;
+#[cfg(windows)]
+mod service;
+#[cfg(windows)]
 mod settings_window;
 #[cfg(windows)]
 mod theme;
 
 #[cfg(windows)]
-fn main() -> eframe::Result {
-    app::run()
+fn main() -> std::process::ExitCode {
+    use std::process::ExitCode;
+
+    // Режимы без окна: служба, отладочный сервер, установка. Остальное — оверлей.
+    match std::env::args().nth(1).as_deref() {
+        Some("--service") => match service::run_dispatcher() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        },
+        Some("--serve") => match service::run_in_console() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("сервер: {error}");
+                ExitCode::from(1)
+            }
+        },
+        Some("--install-service") => report(service::install()),
+        Some("--uninstall-service") => report(service::uninstall()),
+        _ => match app::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(1)
+            }
+        },
+    }
+}
+
+/// Итог установки: код возврата читает UI, текст — журнал.
+#[cfg(windows)]
+fn report(result: Result<(), String>) -> std::process::ExitCode {
+    diag::start(settings::local_dir().join("service-setup.log"));
+    match result {
+        Ok(()) => {
+            diag::log("готово");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            diag::log(format!("ошибка: {error}"));
+            std::process::ExitCode::from(2)
+        }
+    }
 }
 
 #[cfg(not(windows))]

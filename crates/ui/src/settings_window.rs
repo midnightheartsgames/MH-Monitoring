@@ -23,11 +23,13 @@ enum Page {
     Rows,
     Fps,
     Hotkeys,
+    Service,
     About,
 }
 
 impl Page {
-    const ALL: [Page; 5] = [Page::Overlay, Page::Rows, Page::Fps, Page::Hotkeys, Page::About];
+    const ALL: [Page; 6] =
+        [Page::Overlay, Page::Rows, Page::Fps, Page::Hotkeys, Page::Service, Page::About];
 
     fn title(self) -> &'static str {
         match self {
@@ -35,6 +37,7 @@ impl Page {
             Page::Rows => "Строки",
             Page::Fps => "FPS",
             Page::Hotkeys => "Хоткеи",
+            Page::Service => "Служба",
             Page::About => "О программе",
         }
     }
@@ -107,11 +110,24 @@ impl Drafts {
     }
 }
 
+/// Что пользователь попросил сделать со службой. Выполняет приложение: нужен UAC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRequest {
+    Install,
+    Uninstall,
+}
+
 /// Что окно показывает, но не меняет.
 pub struct Context<'a> {
     pub snapshot: &'a Snapshot,
     pub settings_path: &'a Path,
     pub hotkey_errors: &'a [String],
+    /// Откуда снимки: служба или свой движок.
+    pub backend: &'a str,
+    /// Итог последней операции со службой.
+    pub service_status: Option<&'a str>,
+    /// Операция со службой ещё идёт.
+    pub service_busy: bool,
 }
 
 #[derive(Default)]
@@ -125,6 +141,8 @@ pub struct SettingsWindow {
     restart_needed: bool,
     /// Первый кадр окна уже отмечен в журнале.
     first_frame_logged: bool,
+    /// Установлена ли служба — с отметкой, когда проверено: спрашивать SCM на каждом кадре незачем.
+    service_installed: Option<(bool, std::time::Instant)>,
     /// Где открыть окно — рядом с HUD, а не под ним: HUD висит поверх всех окон.
     position: Option<Pos2>,
 }
@@ -145,9 +163,15 @@ impl SettingsWindow {
     }
 
     /// Рисует окно, если оно открыто. Вызывать из `ui` корневого окна каждый кадр.
-    pub fn show(&mut self, ctx: &egui::Context, settings: &mut Settings, info: &Context<'_>) {
+    /// Рисует окно. Возвращает просьбу об операции со службой, если кнопку нажали.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &mut Settings,
+        info: &Context<'_>,
+    ) -> Option<ServiceRequest> {
         if !self.open {
-            return;
+            return None;
         }
         let mut builder = ViewportBuilder::default()
             .with_title("MH Monitor — настройки")
@@ -160,7 +184,7 @@ impl SettingsWindow {
             if class == ViewportClass::EmbeddedWindow {
                 // Встроенных окон нет у нативного eframe; ветка на случай иной сборки.
                 ui.label("окно настроек недоступно");
-                return;
+                return None;
             }
             if !self.first_frame_logged {
                 self.first_frame_logged = true;
@@ -178,16 +202,78 @@ impl SettingsWindow {
                     }
                 }
             });
+            let mut request = None;
             egui::CentralPanel::default().show(ui, |ui| {
                 ScrollArea::vertical().show(ui, |ui| match self.page {
                     Page::Overlay => overlay_page(ui, settings),
                     Page::Rows => rows_page(ui, settings),
                     Page::Fps => self.fps_page(ui, settings, info),
                     Page::Hotkeys => self.hotkeys_page(ui, settings, info),
+                    Page::Service => request = self.service_page(ui, info),
                     Page::About => about_page(ui, info),
                 });
             });
+            request
+        })
+    }
+
+    fn service_page(&mut self, ui: &mut Ui, info: &Context<'_>) -> Option<ServiceRequest> {
+        let fresh = self
+            .service_installed
+            .is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_secs(2));
+        if !fresh && !info.service_busy {
+            self.service_installed =
+                Some((crate::service::is_installed(), std::time::Instant::now()));
+        }
+        let installed = self.service_installed.is_some_and(|(installed, _)| installed);
+
+        group(ui, "Служба MH Monitor");
+        note(ui, &format!("Снимки сейчас: {}", info.backend));
+        note(
+            ui,
+            if installed {
+                "Служба установлена."
+            } else {
+                "Служба не установлена."
+            },
+        );
+        hint(
+            ui,
+            "Служба работает от имени системы: захват кадров и температура CPU — без прав \
+             администратора у самого MH Monitor. Установка и удаление спросят подтверждение UAC.",
+        );
+        ui.add_space(6.0);
+        let mut request = None;
+        ui.add_enabled_ui(!info.service_busy, |ui| {
+            ui.horizontal(|ui| {
+                let install =
+                    if installed { "Переустановить" } else { "Установить" };
+                if ui.button(install).clicked() {
+                    request = Some(ServiceRequest::Install);
+                }
+                if installed && ui.button("Удалить").clicked() {
+                    request = Some(ServiceRequest::Uninstall);
+                }
+            });
         });
+        if request.is_some() {
+            // После операции состояние перепроверить сразу.
+            self.service_installed = None;
+        }
+        if let Some(status) = info.service_status {
+            ui.add_space(4.0);
+            note(ui, &format!("Последняя операция: {status}"));
+        }
+        ui.add_space(8.0);
+        let executable =
+            std::env::current_exe().map(|path| path.display().to_string()).unwrap_or_default();
+        hint(ui, &format!("Служба запускает этот файл: {executable}"));
+        warning(
+            ui,
+            "Держите его там, куда обычные пользователи не пишут (например, Program Files): \
+             подмена файла дала бы права системы.",
+        );
+        request
     }
 
     fn fps_page(&mut self, ui: &mut Ui, settings: &mut Settings, info: &Context<'_>) {
@@ -231,6 +317,10 @@ impl SettingsWindow {
         }
 
         group(ui, "PresentMon");
+        hint(
+            ui,
+            "Свой PresentMon действует только без службы: служба запускает лишь вложенный —              от имени системы чужой файл не запускается.",
+        );
         text_field(
             ui,
             "Свой PresentMon.exe",
