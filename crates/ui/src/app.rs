@@ -47,7 +47,10 @@ pub fn run() -> eframe::Result {
     else {
         return Ok(());
     };
-    diag::start(settings::local_dir().join("mh-monitor.log"));
+    let local = settings::local_dir();
+    // Журнал сборок до переименования больше никто не пишет.
+    let _ = std::fs::remove_file(local.join("mh-monitor.log"));
+    diag::start(local.join("MH-Monitoring.log"));
     diag::log(format!("MH Monitoring {}", env!("CARGO_PKG_VERSION")));
     diag::log(format!(
         "файл: {}; права администратора: {}; установлен: {}; служба запускает: {}",

@@ -1,7 +1,7 @@
 # MH Monitoring
 
 <p align="center">
-  <img src="assets/mh-Monitoring.png" alt="MH Forge" width="600">
+  <img src="assets/mh-Monitoring.png" alt="MH Monitoring" width="600">
 </p>
 
 [![Лицензия: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -127,7 +127,7 @@ frametime-график, 1 % и 0.1 % низкие, а также состоян�
 | Путь | Назначение |
 |---|---|
 | `%APPDATA%\MH Monitoring\settings-rs.json` | Настройки |
-| `%LOCALAPPDATA%\MH Monitoring\mh-monitor.log` | Журнал последнего запуска |
+| `%LOCALAPPDATA%\MH Monitoring\MH-Monitoring.log` | Журнал последнего запуска |
 | `%LOCALAPPDATA%\MH Monitoring\bin` | Распакованный PresentMon |
 
 Повреждённый файл настроек переименовывается в `settings-rs.corrupted.json`, и программа

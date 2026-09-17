@@ -445,7 +445,7 @@ Code.exe,18640,0x27A34FD9080,DXGI,0,0,0,Composed: Flip,199.8651,NA,119.217900000
 - **Ion Fury на полном экране закрывает HUD** (в безрамочном — нет). Вероятно, `Hardware: Legacy
   Flip` — вывод мимо композитора; проверить по строке «Вывод» в настройках.
 - **Диагностика:** `FpsState::presentation` («Other · Hardware: Legacy Flip») видна в настройках,
-  а `%LOCALAPPDATA%\MH Monitoring\mh-monitor.log` пишет шаги последнего запуска со временем.
+  а `%LOCALAPPDATA%\MH Monitoring\MH-Monitoring.log` пишет шаги последнего запуска со временем.
   Окно настроек из работающего приложения открывается за 13–24 мс (без прав).
 - **Порядок полей в payload `Present_Start` проверен: указатель, `Flags`, `SyncInterval`.**
   Повод: PresentMon пишет у DMC4 `PresentFlags = 0`, а собственный ETW видит у всех её вызовов

@@ -1,4 +1,4 @@
-//! Короткий журнал последнего запуска: `%LOCALAPPDATA%\MH Monitoring\mh-monitor.log`.
+//! Короткий журнал последнего запуска: `%LOCALAPPDATA%\MH Monitoring\MH-Monitoring.log`.
 //!
 //! Только ключевые шаги со временем от старта — чтобы по письму пользователя было видно, где
 //! уходят секунды (открытие настроек, выход). Полноценное журналирование — фаза P7.
@@ -58,7 +58,7 @@ mod tests {
     fn the_journal_records_steps_with_durations() {
         let path = std::env::temp_dir()
             .join(format!("mh-ui-diag-{}", std::process::id()))
-            .join("mh-monitor.log");
+            .join("MH-Monitoring.log");
         start(path.clone());
         log("старт");
         assert_eq!(timed("шаг", || 7), 7);
