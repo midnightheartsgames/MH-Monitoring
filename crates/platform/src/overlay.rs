@@ -13,11 +13,26 @@ use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
 };
+use windows_sys::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+
+/// Работает ли сейчас приложение Direct3D в эксклюзивном полноэкранном режиме.
+///
+/// Поверх такого режима окно пользовательского режима не видно. Хуже того, окно поверх игры
+/// делает её «перекрытой», и многие игры перестают рисовать: кадр замирает, а при запуске сразу в
+/// этом режиме экран остаётся чёрным. Поэтому оверлей на это время прячется (PLAN.md §2.16).
+///
+/// Состояние сообщает оболочка — тот же признак, по которому Windows откладывает уведомления.
+/// Безрамочный режим сюда не попадает: для него оболочка отвечает `QUNS_BUSY`.
+pub fn exclusive_fullscreen_active() -> bool {
+    let mut state = 0;
+    let result = unsafe { SHQueryUserNotificationState(&mut state) };
+    result >= 0 && state == QUNS_RUNNING_D3D_FULL_SCREEN
+}
 
 /// Прямоугольник окна в физических пикселях.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -31,3 +31,5 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# COM для ярлыка в «Пуске»: в windows-sys интерфейсов COM нет.
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell"] }

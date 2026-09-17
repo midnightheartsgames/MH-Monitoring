@@ -2,7 +2,7 @@
 name = "mh-sources"
 version.workspace = true
 edition.workspace = true
-description = "Источники данных MH Monitor: кадры (PresentMon, собственный ETW), железо"
+description = "Источники данных MH Monitoring: кадры (PresentMon, собственный ETW), железо"
 
 [dependencies]
 mh-core = { path = "../core" }

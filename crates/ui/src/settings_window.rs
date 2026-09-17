@@ -8,7 +8,7 @@ use std::path::Path;
 
 use eframe::egui::{
     self, Color32, Pos2, RichText, ScrollArea, Slider, Ui, ViewportBuilder, ViewportClass,
-    ViewportId,
+    ViewportCommand, ViewportId, WindowLevel,
 };
 use mh_core::{FpsAvailability, SensorStatus, Snapshot};
 
@@ -17,7 +17,7 @@ use crate::settings::{Metric, SCALES, Settings, TargetChoice};
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Page {
+pub enum Page {
     #[default]
     Overlay,
     Rows,
@@ -37,7 +37,7 @@ impl Page {
             Page::Rows => "Строки",
             Page::Fps => "FPS",
             Page::Hotkeys => "Хоткеи",
-            Page::Service => "Служба",
+            Page::Service => "Установка",
             Page::About => "О программе",
         }
     }
@@ -110,11 +110,14 @@ impl Drafts {
     }
 }
 
-/// Что пользователь попросил сделать со службой. Выполняет приложение: нужен UAC.
+/// Что пользователь попросил сделать с установкой. Выполняет приложение: нужен UAC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceRequest {
+    /// Установить или обновить копию в Program Files вместе со службой.
     Install,
     Uninstall,
+    /// Запустить остановленную службу.
+    StartService,
 }
 
 /// Что окно показывает, но не меняет.
@@ -130,6 +133,30 @@ pub struct Context<'a> {
     pub service_busy: bool,
 }
 
+/// Что известно об установке.
+#[derive(Clone)]
+struct InstallState {
+    installed_version: Option<String>,
+    running_installed: bool,
+    autostart: bool,
+    service_exe: Option<std::path::PathBuf>,
+    service_running: bool,
+    checked: std::time::Instant,
+}
+
+impl InstallState {
+    fn read() -> InstallState {
+        InstallState {
+            installed_version: crate::installer::installed_version(),
+            running_installed: crate::installer::running_installed(),
+            autostart: crate::installer::autostart_enabled(),
+            service_exe: crate::service::registered_executable(),
+            service_running: crate::service::is_running(),
+            checked: std::time::Instant::now(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SettingsWindow {
     pub open: bool,
@@ -141,10 +168,13 @@ pub struct SettingsWindow {
     restart_needed: bool,
     /// Первый кадр окна уже отмечен в журнале.
     first_frame_logged: bool,
-    /// Установлена ли служба — с отметкой, когда проверено: спрашивать SCM на каждом кадре незачем.
-    service_installed: Option<(bool, std::time::Instant)>,
+    /// Состояние установки — с отметкой, когда проверено: спрашивать систему на каждом кадре
+    /// незачем.
+    install_state: Option<InstallState>,
     /// Где открыть окно — рядом с HUD, а не под ним: HUD висит поверх всех окон.
     position: Option<Pos2>,
+    /// Вывести окно вперёд на ближайшем кадре: открыли из трея или хоткеем поверх игры.
+    focus_pending: bool,
 }
 
 /// Размер окна настроек в точках.
@@ -160,10 +190,11 @@ impl SettingsWindow {
             crate::diag::log("настройки: открытие");
         }
         self.open = true;
+        self.focus_pending = true;
     }
 
     /// Рисует окно, если оно открыто. Вызывать из `ui` корневого окна каждый кадр.
-    /// Рисует окно. Возвращает просьбу об операции со службой, если кнопку нажали.
+    /// Возвращает просьбу об операции со службой, если кнопку нажали.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -174,9 +205,12 @@ impl SettingsWindow {
             return None;
         }
         let mut builder = ViewportBuilder::default()
-            .with_title("MH Monitor — настройки")
+            .with_title("MH Monitoring — настройки")
             .with_inner_size(SIZE)
-            .with_min_inner_size([480.0, 360.0]);
+            .with_min_inner_size([480.0, 360.0])
+            // Поверх всех окон, как и HUD: иначе безрамочная игра закрывает настройки, и найти их
+            // можно только через панель задач.
+            .with_window_level(WindowLevel::AlwaysOnTop);
         if let Some(position) = self.position {
             builder = builder.with_position(position);
         }
@@ -189,6 +223,9 @@ impl SettingsWindow {
             if !self.first_frame_logged {
                 self.first_frame_logged = true;
                 crate::diag::log("настройки: первый кадр");
+            }
+            if std::mem::take(&mut self.focus_pending) {
+                ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
             }
             if ui.ctx().input(|input| input.viewport().close_requested()) {
                 self.open = false;
@@ -217,62 +254,108 @@ impl SettingsWindow {
         })
     }
 
+    /// Открывает окно сразу на нужном разделе — например, на «Установке» при первом запуске.
+    pub fn open_page(&mut self, settings: &Settings, position: Option<Pos2>, page: Page) {
+        self.open(settings, position);
+        self.page = page;
+    }
+
     fn service_page(&mut self, ui: &mut Ui, info: &Context<'_>) -> Option<ServiceRequest> {
         let fresh = self
-            .service_installed
-            .is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_secs(2));
+            .install_state
+            .as_ref()
+            .is_some_and(|state| state.checked.elapsed() < std::time::Duration::from_secs(2));
         if !fresh && !info.service_busy {
-            self.service_installed =
-                Some((crate::service::is_installed(), std::time::Instant::now()));
+            self.install_state = Some(InstallState::read());
         }
-        let installed = self.service_installed.is_some_and(|(installed, _)| installed);
+        let state = self.install_state.clone()?;
 
-        group(ui, "Служба MH Monitor");
-        note(ui, &format!("Снимки сейчас: {}", info.backend));
-        note(
-            ui,
-            if installed {
-                "Служба установлена."
-            } else {
-                "Служба не установлена."
-            },
-        );
+        group(ui, "MH Monitoring");
+        match &state.installed_version {
+            Some(version) => note(ui, &format!("Установлен, версия {version}.")),
+            None => note(ui, "Не установлен."),
+        }
+        let this_version = env!("CARGO_PKG_VERSION");
+        if !state.running_installed {
+            hint(ui, &format!("Запущена копия {this_version} не из папки установки."));
+        }
         hint(
             ui,
-            "Служба работает от имени системы: захват кадров и температура CPU — без прав \
-             администратора у самого MH Monitor. Установка и удаление спросят подтверждение UAC.",
+            &format!(
+                "Установка копирует программу в {} и ставит службу: захват кадров и температура \
+                 CPU работают без прав администратора. Подтверждение UAC спросят один раз.",
+                crate::installer::install_dir().display()
+            ),
         );
         ui.add_space(6.0);
         let mut request = None;
         ui.add_enabled_ui(!info.service_busy, |ui| {
             ui.horizontal(|ui| {
-                let install =
-                    if installed { "Переустановить" } else { "Установить" };
-                if ui.button(install).clicked() {
+                let label = match (&state.installed_version, state.running_installed) {
+                    (None, _) => Some("Установить"),
+                    (Some(_), false) => Some("Обновить установленную"),
+                    (Some(_), true) => None,
+                };
+                if let Some(label) = label
+                    && ui.button(label).clicked()
+                {
                     request = Some(ServiceRequest::Install);
                 }
-                if installed && ui.button("Удалить").clicked() {
+                if state.installed_version.is_some() && ui.button("Удалить").clicked() {
                     request = Some(ServiceRequest::Uninstall);
                 }
             });
         });
         if request.is_some() {
-            // После операции состояние перепроверить сразу.
-            self.service_installed = None;
+            self.install_state = None;
         }
         if let Some(status) = info.service_status {
             ui.add_space(4.0);
             note(ui, &format!("Последняя операция: {status}"));
         }
-        ui.add_space(8.0);
-        let executable =
-            std::env::current_exe().map(|path| path.display().to_string()).unwrap_or_default();
-        hint(ui, &format!("Служба запускает этот файл: {executable}"));
-        warning(
-            ui,
-            "Держите его там, куда обычные пользователи не пишут (например, Program Files): \
-             подмена файла дала бы права системы.",
-        );
+
+        group(ui, "Запуск");
+        let mut autostart = state.autostart;
+        if ui.checkbox(&mut autostart, "Запускать вместе с Windows").changed() {
+            match crate::installer::set_autostart(autostart) {
+                Ok(()) => {
+                    if let Some(state) = self.install_state.as_mut() {
+                        state.autostart = autostart;
+                    }
+                }
+                Err(error) => {
+                    self.status = Some((Page::Service, format!("автозапуск: {error}"), true))
+                }
+            }
+        }
+        self.status_line(ui, Page::Service);
+
+        group(ui, "Служба");
+        note(ui, &format!("Снимки сейчас: {}", info.backend));
+        match &state.service_exe {
+            Some(path) => {
+                hint(ui, &format!("Служба запускает: {}", path.display()));
+                if !state.service_running {
+                    warning(ui, "Служба остановлена: без неё кадры и температура CPU недоступны.");
+                    if ui
+                        .add_enabled(!info.service_busy, egui::Button::new("Запустить службу"))
+                        .clicked()
+                    {
+                        request = Some(ServiceRequest::StartService);
+                        self.install_state = None;
+                    }
+                }
+                if !crate::installer::same_path(path, &crate::installer::installed_exe()) {
+                    warning(
+                        ui,
+                        "Служба стоит не на установленной копии. Если этот файл лежит там, куда \
+                         пишут обычные пользователи, его подмена даст права системы — \
+                         переустановите программу.",
+                    );
+                }
+            }
+            None => hint(ui, "Служба не установлена."),
+        }
         request
     }
 
@@ -376,7 +459,7 @@ impl SettingsWindow {
         }
         if self.restart_needed {
             ui.add_space(6.0);
-            warning(ui, "Часть изменений вступит в силу после перезапуска MH Monitor.");
+            warning(ui, "Часть изменений вступит в силу после перезапуска MH Monitoring.");
         }
     }
 }
@@ -464,7 +547,7 @@ fn rows_page(ui: &mut Ui, settings: &mut Settings) {
 }
 
 fn about_page(ui: &mut Ui, info: &Context<'_>) {
-    group(ui, "MH Monitor");
+    group(ui, "MH Monitoring");
     note(ui, &format!("Версия {}", env!("CARGO_PKG_VERSION")));
     note(ui, &format!("Настройки: {}", info.settings_path.display()));
     hint(ui, "PresentMon 2.5.1 (MIT) и модуль PawnIO AMDFamily17 (LGPL-2.1) встроены.");

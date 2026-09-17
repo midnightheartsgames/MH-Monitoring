@@ -13,7 +13,8 @@ use crate::diag;
 use crate::remote::{Link, RemoteEngine};
 
 pub enum Backend {
-    Local(Engine),
+    /// Свой движок; `bool` — установлена ли программа (тогда остановлена служба).
+    Local(Engine, bool),
     Remote(RemoteEngine),
 }
 
@@ -46,23 +47,23 @@ impl Backend {
                 move || repaint.request_repaint_of(egui::ViewportId::ROOT),
             )
         });
-        Backend::Local(engine)
+        Backend::Local(engine, crate::installer::installed_version().is_some())
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, Backend::Local(_))
+        matches!(self, Backend::Local(..))
     }
 
     pub fn snapshot(&self) -> Snapshot {
         match self {
-            Backend::Local(engine) => engine.snapshot(),
+            Backend::Local(engine, _) => engine.snapshot(),
             Backend::Remote(remote) => remote.snapshot(),
         }
     }
 
     pub fn set_target(&self, target: TargetResolution) {
         match self {
-            Backend::Local(engine) => engine.set_target(target),
+            Backend::Local(engine, _) => engine.set_target(target),
             Backend::Remote(remote) => remote.set_target(target),
         }
     }
@@ -70,10 +71,15 @@ impl Backend {
     /// Строка для HUD о связи со службой — если сказать есть что.
     pub fn note(&self) -> Option<String> {
         match self {
-            Backend::Local(_) => None,
+            // Установлено, а снимки свои — значит, служба остановлена. Иначе HUD говорил бы только
+            // «нужны права администратора», и непонятно, что делать.
+            Backend::Local(_, installed) => installed.then(|| {
+                "служба MH Monitoring остановлена — запустите её в настройках, «Установка»"
+                    .to_string()
+            }),
             Backend::Remote(remote) => match remote.link() {
                 Link::Connected { .. } => None,
-                Link::Connecting => Some("служба MH Monitor не отвечает — жду".to_string()),
+                Link::Connecting => Some("служба MH Monitoring не отвечает — жду".to_string()),
                 Link::Refused(reason) => Some(format!("служба отказала: {reason}")),
             },
         }
@@ -82,7 +88,7 @@ impl Backend {
     /// Для окна «О программе».
     pub fn describe(&self) -> String {
         match self {
-            Backend::Local(_) => "движок в этом процессе".to_string(),
+            Backend::Local(..) => "движок в этом процессе".to_string(),
             Backend::Remote(remote) => match remote.link() {
                 Link::Connected { service_version } => format!("служба {service_version}"),
                 Link::Connecting => "служба — нет связи".to_string(),

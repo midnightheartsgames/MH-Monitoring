@@ -33,6 +33,7 @@ pub enum Command {
 /// Просьбы UI к потоку трея.
 enum Request {
     Menu { visible: bool, locked: bool },
+    Tooltip(String),
     Quit,
 }
 
@@ -68,6 +69,12 @@ impl Controls {
     /// Подписи пунктов меню следуют состоянию оверлея.
     pub fn sync_menu(&self, visible: bool, locked: bool) {
         let _ = self.requests.send(Request::Menu { visible, locked });
+    }
+
+    /// Подсказка значка в трее — единственное, что видно поверх эксклюзивного полноэкранного
+    /// режима.
+    pub fn set_tooltip(&self, text: &str) {
+        let _ = self.requests.send(Request::Tooltip(text.to_string()));
     }
 }
 
@@ -143,7 +150,7 @@ fn tray_thread(
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
-        .with_tooltip("MH Monitor")
+        .with_tooltip("MH Monitoring")
         .with_icon(tray_icon())
         .build()
         .ok();
@@ -170,6 +177,11 @@ fn tray_thread(
                     } else {
                         "Заблокировать"
                     });
+                }
+                Request::Tooltip(text) => {
+                    if let Some(tray) = &tray {
+                        let _ = tray.set_tooltip(Some(text));
+                    }
                 }
                 Request::Quit => quit = true,
             }

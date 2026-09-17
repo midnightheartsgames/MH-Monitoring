@@ -110,7 +110,7 @@ fn create_window() -> windows::core::Result<HWND> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class_name,
-            PCWSTR(w!("MH Monitor — эталонный презентер").as_ptr()),
+            PCWSTR(w!("MH Monitoring — эталонный презентер").as_ptr()),
             WS_OVERLAPPEDWINDOW,
             64,
             64,

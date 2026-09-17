@@ -2,10 +2,12 @@
 name = "mh-ui"
 version.workspace = true
 edition.workspace = true
-description = "MH Monitor: оверлей, трей, хоткеи"
+description = "MH Monitoring: оверлей, трей, хоткеи"
+
+build = "build.rs"
 
 [[bin]]
-name = "mh-monitor"
+name = "MH-Monitoring"
 path = "src/main.rs"
 
 [dependencies]
@@ -23,3 +25,6 @@ raw-window-handle = "0.6"
 windows-service = "0.8"
 mh-ipc = { path = "../ipc" }
 mh-sources = { path = "../sources" }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

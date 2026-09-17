@@ -141,7 +141,7 @@ fn header(ui: &mut Ui, actions: &mut HudActions) {
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.label(
-                RichText::new("MH MONITOR")
+                RichText::new("MH MONITORING")
                     .font(theme::bold(12.0))
                     .color(theme::TEXT_SECONDARY)
                     .extra_letter_spacing(1.2),

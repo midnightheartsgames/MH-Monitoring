@@ -1,4 +1,4 @@
-//! MH Monitor — оверлей производительности (PLAN.md §6/P4).
+//! MH Monitoring — оверлей производительности (PLAN.md §6/P4).
 //!
 //! Пока движок работает в этом же процессе (разделение на службу — P6), поэтому для кадров и
 //! температуры CPU приложение нужно запускать от администратора. Без прав HUD так и скажет.
@@ -21,6 +21,8 @@ mod controls;
 mod diag;
 #[cfg(windows)]
 mod hud;
+#[cfg(windows)]
+mod installer;
 #[cfg(windows)]
 mod remote;
 #[cfg(windows)]
@@ -49,7 +51,20 @@ fn main() -> std::process::ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("--install") => report(installer::install()),
+        Some("--uninstall") => {
+            let arguments: Vec<String> = std::env::args().collect();
+            match installer::uninstall(&arguments) {
+                Ok(installer::Uninstall::Cancelled) => ExitCode::from(installer::EXIT_CANCELLED),
+                Ok(installer::Uninstall::RemovedData) => {
+                    report(Ok(()));
+                    ExitCode::from(installer::EXIT_DATA_REMOVED)
+                }
+                other => report(other.map(|_| ())),
+            }
+        }
         Some("--install-service") => report(service::install()),
+        Some("--start-service") => report(service::start()),
         Some("--uninstall-service") => report(service::uninstall()),
         _ => match app::run() {
             Ok(()) => ExitCode::SUCCESS,
@@ -79,5 +94,5 @@ fn report(result: Result<(), String>) -> std::process::ExitCode {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("MH Monitor работает только под Windows");
+    eprintln!("MH Monitoring работает только под Windows");
 }

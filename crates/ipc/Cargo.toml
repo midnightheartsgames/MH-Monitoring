@@ -2,7 +2,7 @@
 name = "mh-ipc"
 version.workspace = true
 edition.workspace = true
-description = "Протокол служба ↔ UI MH Monitor: сообщения и их упаковка"
+description = "Протокол служба ↔ UI MH Monitoring: сообщения и их упаковка"
 
 # Чистый крейт: ни Windows, ни каналов. Транспорт — `mh-platform::pipe`.
 [dependencies]

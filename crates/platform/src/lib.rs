@@ -20,6 +20,8 @@ pub mod elevate;
 #[cfg(windows)]
 pub mod etw;
 #[cfg(windows)]
+pub mod instance;
+#[cfg(windows)]
 pub mod job;
 #[cfg(windows)]
 pub mod overlay;
@@ -33,6 +35,10 @@ pub mod pipe;
 pub mod process;
 #[cfg(windows)]
 pub mod pump;
+#[cfg(windows)]
+pub mod registry;
+#[cfg(windows)]
+pub mod shortcut;
 #[cfg(windows)]
 mod sys;
 

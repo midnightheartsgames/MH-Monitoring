@@ -2,7 +2,7 @@
 name = "mh-engine"
 version.workspace = true
 edition.workspace = true
-description = "Движок MH Monitor: владеет опросом источников и публикует Snapshot"
+description = "Движок MH Monitoring: владеет опросом источников и публикует Snapshot"
 
 [dependencies]
 mh-core = { path = "../core" }

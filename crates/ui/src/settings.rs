@@ -6,7 +6,9 @@
 //! * **Версия схемы в файле.** Файл без версии — формат P4; миграции идут по цепочке до текущей.
 //!   Файл от более новой сборки читается как есть: незнакомые поля пропускаются.
 //! * **Запись атомарная** — через временный файл и переименование.
-//! * **Путь свой.** `settings.json` в той же папке принадлежит Kotlin-версии (PLAN.md §2.16).
+//! * **Путь свой.** `%APPDATA%\MH Monitoring\settings-rs.json`; `settings.json` в старой папке
+//!   `MH Monitor` принадлежит Kotlin-версии (PLAN.md §2.16). Файл Rust-версии из старой папки
+//!   переносится при запуске ([`migrate_legacy_dir`]).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -337,21 +339,57 @@ fn quarantine_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}.corrupted.json"))
 }
 
-/// `%APPDATA%\MH Monitor\settings-rs.json`.
+const APP_DIR: &str = "MH Monitoring";
+/// Папка до переименования. В `%APPDATA%` её делит Kotlin-версия, поэтому переносятся только
+/// файлы Rust-версии, а папка остаётся.
+const LEGACY_APP_DIR: &str = "MH Monitor";
+const SETTINGS_FILE: &str = "settings-rs.json";
+
+/// `%APPDATA%\MH Monitoring\settings-rs.json`.
 ///
-/// **Не `settings.json`**: этот файл принадлежит Kotlin-версии, у него другая схема, и запись
+/// **Не `settings.json`**: это имя занято Kotlin-версией, у её файла другая схема, и запись
 /// поверх уже однажды стёрла её настройки.
 pub fn default_path() -> PathBuf {
-    app_dir(std::env::var_os("APPDATA")).join("settings-rs.json")
+    app_dir(std::env::var_os("APPDATA")).join(SETTINGS_FILE)
 }
 
-/// `%LOCALAPPDATA%\MH Monitor` — сюда раскладываются вложенные программы.
+/// `%LOCALAPPDATA%\MH Monitoring` — сюда раскладываются вложенные программы и журналы.
 pub fn local_dir() -> PathBuf {
     app_dir(std::env::var_os("LOCALAPPDATA"))
 }
 
 fn app_dir(base: Option<std::ffi::OsString>) -> PathBuf {
-    base.map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("MH Monitor")
+    base.map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join(APP_DIR)
+}
+
+/// Переносит настройки из `%APPDATA%\MH Monitor` в новую папку. Вызывать до чтения настроек.
+/// Возвращает, что перенесено, — для журнала.
+pub fn migrate_legacy_dir() -> std::io::Result<Vec<String>> {
+    let Some(base) = std::env::var_os("APPDATA").map(PathBuf::from) else {
+        return Ok(Vec::new());
+    };
+    move_legacy_files(&base.join(LEGACY_APP_DIR), &base.join(APP_DIR))
+}
+
+/// Файл, который уже есть в новой папке, главнее старого: старый тогда не трогается.
+fn move_legacy_files(old_dir: &Path, new_dir: &Path) -> std::io::Result<Vec<String>> {
+    let settings = Path::new(SETTINGS_FILE);
+    let quarantine = quarantine_path(settings);
+    let mut moved = Vec::new();
+    for name in [settings, quarantine.as_path()] {
+        let (from, to) = (old_dir.join(name), new_dir.join(name));
+        if !from.is_file() || to.exists() {
+            continue;
+        }
+        std::fs::create_dir_all(new_dir)?;
+        if std::fs::rename(&from, &to).is_err() {
+            // Другой том (перенаправленный профиль) — копия и удаление.
+            std::fs::copy(&from, &to)?;
+            std::fs::remove_file(&from)?;
+        }
+        moved.push(name.display().to_string());
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]
@@ -366,6 +404,41 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn legacy_settings_move_and_kotlin_files_stay() {
+        let root = std::env::temp_dir().join(format!("mh-ui-{}-legacy", std::process::id()));
+        let (old, new) = (root.join("MH Monitor"), root.join("MH Monitoring"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("settings-rs.json"), "rust").unwrap();
+        std::fs::write(old.join("settings.json"), "kotlin").unwrap();
+
+        let moved = move_legacy_files(&old, &new).unwrap();
+        assert_eq!(moved, vec!["settings-rs.json".to_string()]);
+        assert_eq!(std::fs::read_to_string(new.join("settings-rs.json")).unwrap(), "rust");
+        assert!(!old.join("settings-rs.json").exists());
+        assert!(old.join("settings.json").exists(), "файл Kotlin-версии не трогаем");
+        assert!(!new.join("settings.json").exists());
+
+        // Повторный запуск ничего не делает.
+        assert!(move_legacy_files(&old, &new).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn existing_new_settings_win_over_legacy() {
+        let root = std::env::temp_dir().join(format!("mh-ui-{}-legacy-both", std::process::id()));
+        let (old, new) = (root.join("MH Monitor"), root.join("MH Monitoring"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("settings-rs.json"), "old").unwrap();
+        std::fs::write(new.join("settings-rs.json"), "new").unwrap();
+
+        assert!(move_legacy_files(&old, &new).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(new.join("settings-rs.json")).unwrap(), "new");
+        assert!(old.join("settings-rs.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -508,7 +581,7 @@ mod tests {
 
     #[test]
     fn the_quarantine_name_never_collides_with_the_kotlin_one() {
-        let aside = quarantine_path(Path::new(r"C:\x\MH Monitor\settings-rs.json"));
+        let aside = quarantine_path(Path::new(r"C:\x\MH Monitoring\settings-rs.json"));
         assert_eq!(aside.file_name().unwrap(), "settings-rs.corrupted.json");
     }
 }
