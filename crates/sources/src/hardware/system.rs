@@ -276,8 +276,11 @@ mod tests {
     fn this_machine_reports_memory_and_a_name() {
         let (cpu, memory) = SystemSensor::new().read_slow();
         assert!(cpu.name.is_some());
-        #[cfg(windows)]
-        assert!(memory.speed_mhz.is_some(), "частоту памяти сообщает SMBIOS");
+        // На виртуальной машине (так в CI) SMBIOS частоту модулей не сообщает — это не ошибка.
+        // Но если сообщает, число должно быть частотой памяти, а не мусором.
+        if let Some(speed) = memory.speed_mhz {
+            assert!((100..=20_000).contains(&speed), "{speed} МГц");
+        }
         let total = memory.total_bytes.expect("объём памяти известен");
         assert!(memory.used_bytes.unwrap() <= total);
     }
