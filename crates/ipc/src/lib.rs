@@ -8,7 +8,7 @@
 
 use std::io::{self, Read, Write};
 
-use mh_core::{Snapshot, TargetResolution};
+use mh_core::{SensorOptions, Snapshot, TargetResolution};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +21,18 @@ pub const SERVICE_NAME: &str = "MHMonitor";
 /// Файл службы рядом с `MH-Monitoring.exe` в папке установки.
 pub const SERVICE_EXE_NAME: &str = "MH-Monitoring-Service.exe";
 
-/// Меняется при любом несовместимом изменении сообщений.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Меняется при любом изменении сообщений.
+///
+/// 2 — добавлено [`ToService::Sensors`].
+pub const PROTOCOL_VERSION: u32 = 2;
+/// Самый старый протокол, который служба ещё принимает. Клиент на нём не шлёт того, чего в нём
+/// не было, — так UI после обновления работает и со старой службой, и наоборот.
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
+/// Понимает ли собеседник на протоколе `protocol` сообщение [`ToService::Sensors`].
+pub fn supports_sensor_options(protocol: u32) -> bool {
+    protocol >= 2
+}
 
 /// Больше снимок не бывает даже близко (≈ 5 КБ); защита от мусора в канале.
 pub const MAX_MESSAGE_BYTES: usize = 1 << 20;
@@ -35,6 +45,8 @@ pub enum ToService {
     /// Кого мерить. UI присылает при каждой перемене и периодически — на случай перезапуска
     /// службы.
     Target(TargetResolution),
+    /// Как часто опрашивать железо. Протокол 2 и новее.
+    Sensors(SensorOptions),
 }
 
 /// Служба → UI.
@@ -108,6 +120,10 @@ mod tests {
         round_trip(ToService::Target(TargetResolution::Unresolved {
             reason: FpsReason::NoTarget,
             detail: Some("процесс не выбран".into()),
+        }));
+        round_trip(ToService::Sensors(SensorOptions {
+            hardware_interval_ms: 1_000,
+            gpu: Some("NVIDIA GeForce RTX 5070 Ti".into()),
         }));
         round_trip(ToClient::Refused { reason: "протокол 2".into() });
     }

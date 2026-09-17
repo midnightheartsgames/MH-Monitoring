@@ -7,7 +7,7 @@ use eframe::egui::{
     self, Id, Pos2, Rect, Sense, Vec2, ViewportBuilder, ViewportCommand, WindowLevel, pos2,
 };
 use mh_engine::{TargetWatcher, extract_presentmon};
-use mh_platform::overlay::{OverlayWindow, ScreenRect, is_on_any_monitor, work_area_near};
+use mh_platform::overlay::{Monitor, OverlayWindow, ScreenRect, is_on_any_monitor, work_area_near};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::backend::{Backend, LocalConfig};
@@ -15,6 +15,7 @@ use crate::controls::{Command, Controls};
 use crate::diag;
 use crate::games::BorderlessWatcher;
 use crate::hud::{self, HudActions, SeenRows};
+use crate::placement::{self, Anchor, Area};
 use crate::settings::{self, FullscreenMode, Settings};
 use crate::settings_window::{self, Page, ServiceRequest, SettingsWindow};
 use crate::setup_window::{self, SetupChoice, SetupWindow};
@@ -105,7 +106,7 @@ pub fn run() -> eframe::Result {
             .with_taskbar(false)
             .with_resizable(false)
             .with_active(false)
-            .with_inner_size([theme::OVERLAY_WIDTH, ESTIMATED_SIZE.1 as f32])
+            .with_inner_size([hud::width(&settings), ESTIMATED_SIZE.1 as f32])
             .with_mouse_passthrough(overlay.locked)
             .with_visible(overlay.visible),
         persist_window: false,
@@ -129,6 +130,7 @@ struct Applied {
     locked: bool,
     always_on_top: bool,
     scale: f32,
+    anchor: Anchor,
 }
 
 /// Что сделано с HUD из-за эксклюзивного полноэкранного режима.
@@ -149,6 +151,7 @@ impl Applied {
             locked: settings.overlay.locked,
             always_on_top: settings.overlay.always_on_top,
             scale: settings.overlay.scale,
+            anchor: settings.overlay.anchor,
         }
     }
 }
@@ -202,12 +205,17 @@ struct OverlayApp {
     setup_window: SetupWindow,
     /// Почему не удался выбор в окне первого запуска.
     setup_status: Option<String>,
-    /// Сколько мониторов подключено — для подсказки в окне первого запуска.
-    monitor_count: usize,
+    /// Подключённые мониторы: для закрепления HUD и для выбора в настройках. Обновляются при
+    /// уборке, раз в секунду.
+    monitors: Vec<Monitor>,
     /// Когда проверить остановленную службу и попросить её запустить.
     service_start_due: Option<Instant>,
     /// Окна игр без рамки на весь монитор.
     borderless: BorderlessWatcher,
+    /// Размер окна измеряемой игры — для строки API. Обновляется при уборке.
+    resolution: Option<(u32, u32)>,
+    /// Режим «Только игра» спрятал HUD: в фокусе не измеряемая игра.
+    game_hidden: bool,
 }
 
 impl OverlayApp {
@@ -315,9 +323,11 @@ impl OverlayApp {
             fullscreen_note_until: None,
             setup_window: SetupWindow::new(setup),
             setup_status: None,
-            monitor_count: mh_platform::overlay::monitors().len(),
+            monitors: mh_platform::overlay::monitors(),
             service_start_due,
             borderless: BorderlessWatcher::default(),
+            resolution: None,
+            game_hidden: false,
         }
     }
 
@@ -347,7 +357,7 @@ impl OverlayApp {
     /// Доводит окно и движок до настроек. Вызывается каждый кадр; дёшево, пока ничего не менялось.
     fn sync(&mut self, ctx: &egui::Context) {
         let mut wanted = Applied::of(&self.settings);
-        wanted.visible &= self.fullscreen != Fullscreen::Hidden;
+        wanted.visible &= self.fullscreen != Fullscreen::Hidden && !self.game_hidden;
         let previous = self.applied.replace(wanted.clone());
         if previous.as_ref() == Some(&wanted) {
             return;
@@ -389,9 +399,8 @@ impl OverlayApp {
         self.next_housekeeping = now + HOUSEKEEPING;
         self.check_exclusive_fullscreen(now);
         self.borderless.tick(&self.settings.games);
-        if self.setup_window.open {
-            self.monitor_count = mh_platform::overlay::monitors().len();
-        }
+        self.monitors = mh_platform::overlay::monitors();
+        self.resolution = self.measured_resolution();
         let Some(window) = self.window else { return };
         if !self.settings.overlay.visible || self.fullscreen == Fullscreen::Hidden {
             return;
@@ -406,6 +415,14 @@ impl OverlayApp {
         }
 
         let Some(rect) = window.rect() else { return };
+        if let Some((x, y)) = self.anchored_spot(rect) {
+            // Закреплённый HUD стоит в своём углу; своё место не запоминает — оно понадобится,
+            // когда закрепление снимут.
+            if (rect.left, rect.top) != (x, y) {
+                window.move_to(x, y);
+            }
+            return;
+        }
         if !is_on_any_monitor(rect) {
             // Монитор отключили вместе с HUD.
             window.move_to(DEFAULT_POSITION.0, DEFAULT_POSITION.1);
@@ -413,6 +430,35 @@ impl OverlayApp {
         }
         self.settings.overlay.x = Some(rect.left);
         self.settings.overlay.y = Some(rect.top);
+    }
+
+    /// Размер окна игры, которую сейчас меряют. Считается, только если строка включена: это
+    /// перебор всех окон системы.
+    fn measured_resolution(&self) -> Option<(u32, u32)> {
+        if !self.settings.metrics.is_enabled(settings::Metric::FpsApi) {
+            return None;
+        }
+        let snapshot = self.backend.as_ref()?.snapshot();
+        mh_platform::game_window::client_size(snapshot.fps.target?.pid)
+    }
+
+    /// Где должен стоять закреплённый HUD. `None` — не закреплён или мониторов не видно.
+    ///
+    /// Размер — тот, что запрошен у окна последним: окно меняет размер не сразу, а нижний угол
+    /// считается от высоты.
+    fn anchored_spot(&self, rect: ScreenRect) -> Option<(i32, i32)> {
+        let anchor = &self.settings.overlay.anchor;
+        if !anchor.enabled {
+            return None;
+        }
+        let areas: Vec<(Area, bool)> =
+            self.monitors.iter().map(|monitor| (area(monitor.bounds), monitor.primary)).collect();
+        let screen = placement::chosen_monitor(&areas, anchor.monitor)?;
+        let size = match self.last_size {
+            Some((size, ppp)) => ((size.x * ppp).round() as i32, (size.y * ppp).round() as i32),
+            None => (rect.right - rect.left, rect.bottom - rect.top),
+        };
+        Some(placement::anchored_position(screen, size, anchor))
     }
 
     /// Эксклюзивный полноэкранный режим: оверлей уходит с монитора игры и не трогает порядок окон,
@@ -520,7 +566,33 @@ impl OverlayApp {
         let has_frames = backend.snapshot().fps.availability == mh_core::FpsAvailability::Available;
         let resolution =
             self.watcher.resolve(now_ms, &self.settings.fps.target_settings(), has_frames);
+        let target = resolution.target().map(|target| target.pid);
         backend.set_target(resolution);
+        backend.set_sensor_options(self.settings.sensors.clone());
+        self.update_game_only(target, has_frames);
+    }
+
+    /// Режим «Только игра»: HUD виден, пока в фокусе измеряемая игра. Пока открыты настройки
+    /// или окно первого запуска, HUD виден всегда — иначе не видно, что они меняют.
+    fn update_game_only(&mut self, target: Option<u32>, has_frames: bool) {
+        let active = self.settings.overlay.game_only
+            && !self.settings_window.open
+            && !self.setup_window.open;
+        let hidden = active
+            && game_only_hidden(
+                self.game_hidden,
+                target.filter(|_| has_frames),
+                mh_platform::game_window::foreground().map(|window| window.pid),
+                std::process::id(),
+            );
+        if hidden != self.game_hidden {
+            diag::log(if hidden {
+                "«Только игра»: в фокусе не игра — HUD скрыт"
+            } else {
+                "«Только игра»: игра в фокусе — HUD показан"
+            });
+            self.game_hidden = hidden;
+        }
     }
 
     /// Появилась служба — переходим на неё: свой движок без прав видит меньше.
@@ -698,6 +770,10 @@ impl eframe::App for OverlayApp {
             // Скрытое окно само не перерисовывается — а выход из режима нужно заметить.
             ctx.request_repaint_after(HOUSEKEEPING);
         }
+        if self.settings.overlay.game_only {
+            // Возвращение игры в фокус нужно заметить и у скрытого окна.
+            ctx.request_repaint_after(TARGET_EVERY);
+        }
         self.save_if_due(self.exiting);
         if self.exiting {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -709,7 +785,9 @@ impl eframe::App for OverlayApp {
         let snapshot = self.backend.as_ref().map(Backend::snapshot).unwrap_or_default();
 
         // Область перетаскивания — до содержимого, чтобы кнопки заголовка лежали поверх неё.
-        if !self.settings.overlay.locked
+        let overlay = &self.settings.overlay;
+        if !overlay.locked
+            && !overlay.anchor.enabled
             && let Some(rect) = self.hud_rect
             && ui.interact(rect, Id::new("hud-drag"), Sense::drag()).drag_started()
         {
@@ -726,8 +804,17 @@ impl eframe::App for OverlayApp {
         }
         notes.extend(self.borderless.problem.clone());
         notes.extend(self.backend.as_ref().and_then(Backend::note));
+        let extras = hud::Extras {
+            notes: &notes,
+            resolution: self.resolution,
+            clock: self.settings.overlay.show_clock.then(mh_platform::system_info::local_time),
+        };
+        if extras.clock.is_some() {
+            // Минута сменится и без нового снимка — например, когда служба не отвечает.
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         let rect =
-            hud::show(ui, &snapshot, &self.settings, &mut self.seen_rows, &notes, &mut actions);
+            hud::show(ui, &snapshot, &self.settings, &mut self.seen_rows, &extras, &mut actions);
         self.hud_rect = Some(rect);
 
         // Окно повторяет размер HUD: высота зависит от того, какие строки есть. Размер в точках
@@ -741,6 +828,10 @@ impl eframe::App for OverlayApp {
         if changed {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
             self.last_size = Some((size, pixels_per_point));
+            if self.settings.overlay.anchor.enabled {
+                // У нижнего угла место зависит от высоты — переставить сразу, а не через секунду.
+                self.next_housekeeping = Instant::now();
+            }
         }
 
         if actions.toggle_lock {
@@ -758,14 +849,23 @@ impl eframe::App for OverlayApp {
             backend: &backend,
             service_status: self.service_status.as_deref(),
             service_busy: self.service_task.is_some(),
+            monitors: &monitor_titles(&self.monitors),
+            sensor_options_supported: self
+                .backend
+                .as_ref()
+                .is_none_or(Backend::sensor_options_supported),
         };
         if let Some(request) = self.settings_window.show(&ctx, &mut self.settings, &info) {
             self.request_service(request);
         }
+        // Скрытый оверлей eframe не рисует — вместе с ним не рисовались бы и настройки.
+        if !self.settings.overlay.visible {
+            self.settings_window.open = false;
+        }
         let setup = setup_window::Context {
             busy: self.service_task.is_some(),
             status: self.setup_status.as_deref(),
-            monitors: self.monitor_count,
+            monitors: self.monitors.len(),
         };
         if let Some(choice) = self.setup_window.show(&ctx, &mut self.settings, &setup) {
             self.apply_setup(choice);
@@ -786,6 +886,43 @@ impl eframe::App for OverlayApp {
         let backend = self.backend.take();
         diag::timed("движок остановлен", || drop(backend));
     }
+}
+
+/// Прятать ли HUD в режиме «Только игра».
+///
+/// `target` — процесс, чьи кадры сейчас идут. Одного фокуса мало: в автоматическом режиме целью
+/// становится любое окно в фокусе, и браузер тоже был бы «игрой». Кадры идут — значит, рисует.
+///
+/// В фокусе собственное окно (щёлкнули по HUD или трею) или никакого — решение не меняется:
+/// иначе HUD исчезал бы от щелчка по нему самому.
+fn game_only_hidden(
+    previous: bool,
+    target: Option<u32>,
+    foreground: Option<u32>,
+    own: u32,
+) -> bool {
+    match foreground {
+        Some(pid) if pid == own => previous,
+        Some(pid) => target != Some(pid),
+        None => previous,
+    }
+}
+
+fn area(rect: ScreenRect) -> Area {
+    Area { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+}
+
+/// Мониторы для выбора в настройках: сначала «основной», дальше по порядку Windows — так же,
+/// как их нумерует [`placement::chosen_monitor`].
+fn monitor_titles(monitors: &[Monitor]) -> Vec<String> {
+    let mut titles = vec!["Основной монитор".to_string()];
+    titles.extend(monitors.iter().enumerate().map(|(index, monitor)| {
+        let bounds = monitor.bounds;
+        let size = format!("{}×{}", bounds.right - bounds.left, bounds.bottom - bounds.top);
+        let primary = if monitor.primary { ", основной" } else { "" };
+        format!("Монитор {} ({size}{primary})", index + 1)
+    }));
+    titles
 }
 
 /// Точка для окна настроек рядом с HUD, в точках egui.
@@ -875,6 +1012,17 @@ mod tests {
         let (x, y) = beside(hud, screen, 960, 750);
         assert!(x >= screen.left && x + 960 <= screen.right);
         assert_eq!(y, 10);
+    }
+
+    #[test]
+    fn game_only_shows_the_hud_just_for_the_measured_game() {
+        const OWN: u32 = 1;
+        assert!(!game_only_hidden(true, Some(42), Some(42), OWN), "игра в фокусе");
+        assert!(game_only_hidden(false, Some(42), Some(7), OWN), "в фокусе другое окно");
+        assert!(game_only_hidden(false, None, Some(7), OWN), "кадров нет — не игра");
+        assert!(game_only_hidden(true, Some(42), Some(OWN), OWN), "щелчок по HUD ничего не меняет");
+        assert!(!game_only_hidden(false, Some(42), Some(OWN), OWN));
+        assert!(!game_only_hidden(false, Some(42), None, OWN), "фокуса нет — как было");
     }
 
     #[test]

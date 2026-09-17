@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use mh_core::latency::LatencyWindow;
 use mh_core::{FrameStatistics, FrametimeRing, Millis};
 
 use crate::clock::Clock;
@@ -92,6 +93,7 @@ struct FrameWindow {
     last_frame_at_ms: Option<Millis>,
     swap_chain: Option<String>,
     modes: RecentModes,
+    latency: LatencyWindow,
 }
 
 /// Режимы вывода последних кадров.
@@ -213,6 +215,8 @@ pub struct SessionReport {
     pub session_id: u64,
     /// «DXGI · Composed: Flip» последнего кадра.
     pub presentation: Option<String>,
+    /// Средняя задержка вывода за последнюю секунду.
+    pub latency_ms: Option<f64>,
 }
 
 /// Живой сеанс захвата.
@@ -256,6 +260,7 @@ impl CaptureSession {
                 last_frame_at_ms: None,
                 swap_chain: None,
                 modes: RecentModes::default(),
+                latency: LatencyWindow::default(),
             }),
             counters: AtomicCounters::default(),
             stderr_tail: Mutex::new(BoundedTail::new(MAX_ERROR_LINES)),
@@ -331,9 +336,13 @@ impl CaptureSession {
             let statistics = window.ring.statistics(now_ms, &mut self.ordered, &mut self.scratch);
             (statistics, window.swap_chain.clone(), window.last_frame_at_ms)
         };
-        let (untracked_mode, presentation) = {
-            let window = self.shared.window.lock().unwrap_or_else(|e| e.into_inner());
-            (window.modes.dominant_untracked().map(str::to_string), window.modes.presentation())
+        let (untracked_mode, presentation, latency_ms) = {
+            let mut window = self.shared.window.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                window.modes.dominant_untracked().map(str::to_string),
+                window.modes.presentation(),
+                window.latency.average(now_ms),
+            )
         };
 
         let status = self.status(now_ms, last_frame_at_ms, untracked_mode);
@@ -345,6 +354,7 @@ impl CaptureSession {
             last_frame_at_ms,
             session_id: self.session_id,
             presentation,
+            latency_ms,
         }
     }
 
@@ -560,6 +570,9 @@ fn handle_line(
     if window.ring.record(frame.frame_time_ms, now_ms) {
         window.last_frame_at_ms = Some(now_ms);
         window.modes.record(frame.present_mode, frame.present_runtime);
+        if let Some(latency) = frame.latency_ms {
+            window.latency.record(latency, now_ms);
+        }
         if window.swap_chain.as_ref() != swap_chains.selected() {
             window.swap_chain = swap_chains.selected().cloned();
         }

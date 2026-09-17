@@ -95,6 +95,7 @@ impl FrameSource for FakeSource {
             last_frame_at_ms: Some(1_000),
             diagnostics: format!("подставной {:?}", self.kind),
             presentation: None,
+            latency_ms: None,
         }
     }
 

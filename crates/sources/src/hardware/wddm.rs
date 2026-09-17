@@ -9,7 +9,7 @@ use mh_core::{GpuStats, SectionHealth, SensorReason};
 use mh_platform::gpu::{Adapter, adapters};
 use mh_platform::pdh::CounterQuery;
 
-use super::gpu_counters::{adapter_load, adapter_memory};
+use super::gpu_counters::{adapter_load, adapter_memory, same_gpu_name};
 
 const ENGINE_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
 const MEMORY_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
@@ -23,14 +23,17 @@ pub struct WddmGpuSensor {
 }
 
 impl WddmGpuSensor {
-    /// Выбирает карту с наибольшей выделенной памятью: в игровой машине это и есть основная, а
-    /// встроенная графика рядом с ней памяти почти не имеет.
-    pub fn open() -> Result<Self, SensorReason> {
-        let info = adapters()
-            .into_iter()
-            .filter(|info| !info.software && info.dedicated_memory_bytes > 0)
-            .max_by_key(|info| info.dedicated_memory_bytes)
-            .ok_or(SensorReason::NoSupportedGpu)?;
+    /// Карта с именем `wanted`, а без выбора — с наибольшей выделенной памятью: в игровой машине
+    /// это и есть основная, а встроенная графика рядом с ней памяти почти не имеет.
+    pub fn open(wanted: Option<&str>) -> Result<Self, SensorReason> {
+        let candidates = adapters().into_iter().filter(|info| !info.software);
+        let info = match wanted {
+            Some(wanted) => candidates.into_iter().find(|info| same_gpu_name(&info.name, wanted)),
+            None => candidates
+                .filter(|info| info.dedicated_memory_bytes > 0)
+                .max_by_key(|info| info.dedicated_memory_bytes),
+        }
+        .ok_or(SensorReason::NoSupportedGpu)?;
         let adapter = Adapter::open(info.luid).ok_or(SensorReason::GpuQueryFailed)?;
         // Без счётчиков остаются датчики ядра — это лучше, чем ничего.
         let mut counters = CounterQuery::open(&[ENGINE_COUNTER, MEMORY_COUNTER]).ok();
@@ -100,7 +103,7 @@ mod tests {
     /// и загрузка с памятью обязаны читаться.
     #[test]
     fn this_machine_either_reads_or_explains() {
-        match WddmGpuSensor::open() {
+        match WddmGpuSensor::open(None) {
             Ok(mut sensor) => {
                 assert!(!sensor.name().is_empty());
                 let _ = sensor.read_load();

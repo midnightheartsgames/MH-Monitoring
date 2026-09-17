@@ -13,16 +13,29 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use mh_core::{TargetMode, TargetSettings};
+use mh_core::{SensorOptions, TargetMode, TargetSettings};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Текущая версия схемы. Меняется вместе с добавлением шага в [`migrate`].
-pub const CURRENT_VERSION: u32 = 2;
+use crate::blocks::Blocks;
+use crate::placement::Anchor;
+use crate::units::Units;
 
-/// Допустимые масштабы HUD.
-pub const SCALES: [f32; 4] = [0.75, 1.0, 1.25, 1.5];
+/// Текущая версия схемы. Меняется вместе с добавлением шага в [`migrate`].
+pub const CURRENT_VERSION: u32 = 3;
+
+/// Пределы и шаг масштаба HUD.
+pub const MIN_SCALE: f32 = 0.5;
+pub const MAX_SCALE: f32 = 2.0;
+pub const SCALE_STEP: f32 = 0.05;
 pub const MIN_OPACITY: f32 = 0.3;
+/// Пределы ширины HUD — доля от обычной.
+pub const MIN_WIDTH_SCALE: f32 = 0.8;
+pub const MAX_WIDTH_SCALE: f32 = 1.5;
+/// Пределы высоты полосы в режиме «Строка», в точках.
+pub const MIN_STRIP_HEIGHT: f32 = 20.0;
+pub const MAX_STRIP_HEIGHT: f32 = 48.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -32,7 +45,7 @@ pub struct OverlaySettings {
     pub y: Option<i32>,
     /// Непрозрачность **только фона**; текст всегда непрозрачен (PLAN.md §6/P4).
     pub opacity: f32,
-    /// Масштаб HUD поверх масштаба Windows, одно из [`SCALES`].
+    /// Масштаб HUD поверх масштаба Windows, от [`MIN_SCALE`] до [`MAX_SCALE`].
     pub scale: f32,
     /// Заблокирован — значит прозрачен для мыши: мышь принадлежит игре.
     pub locked: bool,
@@ -41,8 +54,43 @@ pub struct OverlaySettings {
     pub show_graph: bool,
     pub show_header: bool,
     /// Что делать с HUD, пока игра в эксклюзивном полноэкранном режиме.
-    #[serde(deserialize_with = "lenient_fullscreen")]
+    #[serde(deserialize_with = "lenient")]
     pub fullscreen: FullscreenMode,
+    /// Ширина HUD — доля от обычной, от [`MIN_WIDTH_SCALE`] до [`MAX_WIDTH_SCALE`].
+    pub width_scale: f32,
+    /// Закрепление в углу монитора. Выключено — HUD стоит там, куда его перетащили.
+    pub anchor: Anchor,
+    /// Столбец блоков или одна полоса.
+    #[serde(deserialize_with = "lenient")]
+    pub mode: OverlayMode,
+    /// Высота полосы в режиме «Строка», от [`MIN_STRIP_HEIGHT`] до [`MAX_STRIP_HEIGHT`].
+    pub strip_height: f32,
+    /// Строка с текущим временем.
+    pub show_clock: bool,
+    /// HUD виден, только пока в фокусе измеряемая игра.
+    pub game_only: bool,
+}
+
+/// Как раскладывается HUD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayMode {
+    /// Блоки друг под другом, со всеми строками и графиком.
+    #[default]
+    Full,
+    /// Одна горизонтальная полоса: у каждого блока главное число и несколько значений.
+    Strip,
+}
+
+impl OverlayMode {
+    pub const ALL: [OverlayMode; 2] = [OverlayMode::Full, OverlayMode::Strip];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            OverlayMode::Full => "Полноразмерный",
+            OverlayMode::Strip => "Строка",
+        }
+    }
 }
 
 /// Поверх эксклюзивного полноэкранного режима окна не видны (PLAN.md §6/P9).
@@ -57,11 +105,13 @@ pub enum FullscreenMode {
 }
 
 /// Незнакомое значение от другой сборки — умолчание, а не карантин всего файла.
-fn lenient_fullscreen<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<FullscreenMode, D::Error> {
+pub fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
     let value = Value::deserialize(deserializer)?;
-    Ok(FullscreenMode::deserialize(value).unwrap_or_default())
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 impl Default for OverlaySettings {
@@ -77,22 +127,13 @@ impl Default for OverlaySettings {
             show_graph: true,
             show_header: true,
             fullscreen: FullscreenMode::Hide,
+            width_scale: 1.0,
+            anchor: Anchor::default(),
+            mode: OverlayMode::Full,
+            strip_height: 28.0,
+            show_clock: false,
+            game_only: false,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SectionSettings {
-    pub gpu: bool,
-    pub cpu: bool,
-    pub ram: bool,
-    pub fps: bool,
-}
-
-impl Default for SectionSettings {
-    fn default() -> Self {
-        Self { gpu: true, cpu: true, ram: true, fps: true }
     }
 }
 
@@ -101,34 +142,63 @@ impl Default for SectionSettings {
 pub enum Metric {
     GpuTemperature,
     GpuClock,
+    GpuMemoryClock,
     GpuVram,
     GpuPower,
     GpuFan,
+    GpuFanPercent,
     CpuTemperature,
     CpuClock,
+    CpuHybridClock,
     CpuPower,
+    CpuCoreLoad,
+    CpuCoreClock,
     RamUsed,
+    RamProcess,
+    RamSpeed,
     FpsAverage,
     FpsLow1,
     FpsLow01,
+    FpsLatency,
+    FpsApi,
+    FpsTarget,
 }
 
 impl Metric {
     #[cfg(test)]
-    pub const ALL: [Metric; 12] = [
+    pub const ALL: [Metric; 22] = [
         Metric::GpuTemperature,
         Metric::GpuClock,
+        Metric::GpuMemoryClock,
         Metric::GpuVram,
         Metric::GpuPower,
         Metric::GpuFan,
+        Metric::GpuFanPercent,
         Metric::CpuTemperature,
         Metric::CpuClock,
+        Metric::CpuHybridClock,
         Metric::CpuPower,
+        Metric::CpuCoreLoad,
+        Metric::CpuCoreClock,
         Metric::RamUsed,
+        Metric::RamProcess,
+        Metric::RamSpeed,
         Metric::FpsAverage,
         Metric::FpsLow1,
         Metric::FpsLow01,
+        Metric::FpsLatency,
+        Metric::FpsApi,
+        Metric::FpsTarget,
     ];
+
+    /// Включена ли строка у того, кто её не трогал. Громоздкие строки — по ядрам — и те, что
+    /// нужны не всем, включаются сами.
+    pub fn on_by_default(self) -> bool {
+        !matches!(
+            self,
+            Metric::GpuFanPercent | Metric::CpuCoreLoad | Metric::CpuCoreClock | Metric::FpsApi
+        )
+    }
 
     /// Имя в файле. Храним строками, а не перечислением serde: одно незнакомое имя от другой
     /// сборки иначе сломало бы разбор всего файла.
@@ -136,16 +206,26 @@ impl Metric {
         match self {
             Metric::GpuTemperature => "gpu_temperature",
             Metric::GpuClock => "gpu_clock",
+            Metric::GpuMemoryClock => "gpu_memory_clock",
             Metric::GpuVram => "gpu_vram",
             Metric::GpuPower => "gpu_power",
             Metric::GpuFan => "gpu_fan",
+            Metric::GpuFanPercent => "gpu_fan_percent",
             Metric::CpuTemperature => "cpu_temperature",
             Metric::CpuClock => "cpu_clock",
+            Metric::CpuHybridClock => "cpu_hybrid_clock",
             Metric::CpuPower => "cpu_power",
+            Metric::CpuCoreLoad => "cpu_core_load",
+            Metric::CpuCoreClock => "cpu_core_clock",
             Metric::RamUsed => "ram_used",
+            Metric::RamProcess => "ram_process",
+            Metric::RamSpeed => "ram_speed",
             Metric::FpsAverage => "fps_average",
             Metric::FpsLow1 => "fps_low_1",
             Metric::FpsLow01 => "fps_low_0_1",
+            Metric::FpsLatency => "fps_latency",
+            Metric::FpsApi => "fps_api",
+            Metric::FpsTarget => "fps_target",
         }
     }
 }
@@ -153,8 +233,12 @@ impl Metric {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricSettings {
-    /// Выключенные строки. Всё, чего здесь нет, включено.
+    /// Выключенные строки из тех, что включены по умолчанию.
     pub disabled: BTreeSet<String>,
+    /// Включённые строки из тех, что по умолчанию выключены ([`Metric::on_by_default`]).
+    /// Отдельный список, потому что новая строка не должна появиться у всех, кто уже что-то
+    /// выключал.
+    pub enabled: BTreeSet<String>,
     /// Строка, которую машина ни разу не сообщила, исчезает вместо прочерка.
     ///
     /// Выключено по умолчанию: HUD с постоянным набором строк читается легче, чем HUD, чья
@@ -164,14 +248,24 @@ pub struct MetricSettings {
 
 impl MetricSettings {
     pub fn is_enabled(&self, metric: Metric) -> bool {
-        !self.disabled.contains(metric.key())
+        if metric.on_by_default() {
+            !self.disabled.contains(metric.key())
+        } else {
+            self.enabled.contains(metric.key())
+        }
     }
 
     pub fn set_enabled(&mut self, metric: Metric, enabled: bool) {
-        if enabled {
-            self.disabled.remove(metric.key());
+        let key = metric.key();
+        let (list, add) = if metric.on_by_default() {
+            (&mut self.disabled, !enabled)
         } else {
-            self.disabled.insert(metric.key().to_string());
+            (&mut self.enabled, enabled)
+        };
+        if add {
+            list.insert(key.to_string());
+        } else {
+            list.remove(key);
         }
     }
 }
@@ -244,8 +338,11 @@ impl Default for HotkeySettings {
 pub struct Settings {
     pub version: u32,
     pub overlay: OverlaySettings,
-    pub sections: SectionSettings,
+    pub blocks: Blocks,
     pub metrics: MetricSettings,
+    pub units: Units,
+    /// Как часто опрашивать железо; уходит движку или службе.
+    pub sensors: SensorOptions,
     pub fps: FpsSettings,
     pub hotkeys: HotkeySettings,
     /// Окно первого запуска пройдено: выбрана установка или работа без прав.
@@ -258,8 +355,10 @@ impl Default for Settings {
         Self {
             version: CURRENT_VERSION,
             overlay: OverlaySettings::default(),
-            sections: SectionSettings::default(),
+            blocks: Blocks::default(),
             metrics: MetricSettings::default(),
+            units: Units::default(),
+            sensors: SensorOptions::default(),
             fps: FpsSettings::default(),
             hotkeys: HotkeySettings::default(),
             setup_done: false,
@@ -297,6 +396,16 @@ impl Settings {
         }
     }
 
+    /// Настройки из файла, который выбрал пользователь. В отличие от [`Settings::load`], чужой
+    /// файл не трогается: негодный просто не принимается.
+    pub fn import(path: &Path) -> Result<Loaded, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|error| format!("не прочитан: {error}"))?;
+        let (settings, notice) =
+            parse(&text).map_err(|()| "это не файл настроек MH Monitoring".to_string())?;
+        Ok(Loaded { settings, notice })
+    }
+
     /// Запись через временный файл: оборванная запись не оставит полуфайл.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
@@ -317,15 +426,28 @@ impl Settings {
         } else {
             defaults.opacity
         };
-        // Масштаб — к ближайшему допустимому: 1.1 из старого файла — это 100 %, а не ошибка.
+        // Масштаб — в пределы и на сетку шага: 1.0000001 из файла — это ровно 100 %.
         overlay.scale = if overlay.scale.is_finite() {
-            SCALES
-                .into_iter()
-                .min_by(|a, b| (a - overlay.scale).abs().total_cmp(&(b - overlay.scale).abs()))
-                .unwrap_or(defaults.scale)
+            let steps = (overlay.scale.clamp(MIN_SCALE, MAX_SCALE) / SCALE_STEP).round();
+            (steps * SCALE_STEP * 100.0).round() / 100.0
         } else {
             defaults.scale
         };
+
+        overlay.width_scale = if overlay.width_scale.is_finite() {
+            let scale = overlay.width_scale.clamp(MIN_WIDTH_SCALE, MAX_WIDTH_SCALE);
+            (scale * 20.0).round() / 20.0
+        } else {
+            defaults.width_scale
+        };
+        overlay.anchor = overlay.anchor.sanitized();
+        overlay.strip_height = if overlay.strip_height.is_finite() {
+            overlay.strip_height.round().clamp(MIN_STRIP_HEIGHT, MAX_STRIP_HEIGHT)
+        } else {
+            defaults.strip_height
+        };
+        self.blocks = std::mem::take(&mut self.blocks).sanitized();
+        self.sensors = self.sensors.sanitized();
 
         let fps = &mut self.fps;
         fps.manual_process = non_blank(fps.manual_process.take());
@@ -392,6 +514,28 @@ fn migrate(value: &mut Value, from: u32) {
     if from < 2 {
         value["setup_done"] = Value::from(true);
         value["version"] = Value::from(2);
+    }
+    // v2 → v3: блоки со своими названиями, цветами и порогами. Прежние флажки секций
+    // становятся `blocks.*.enabled`.
+    if from < 3 {
+        if let Some(object) = value.as_object_mut()
+            && let Some(Value::Object(sections)) = object.remove("sections")
+        {
+            let blocks =
+                object.entry("blocks").or_insert_with(|| Value::Object(Default::default()));
+            for key in Blocks::KEYS {
+                if let (Some(enabled), Some(blocks)) =
+                    (sections.get(key).and_then(Value::as_bool), blocks.as_object_mut())
+                {
+                    let block =
+                        blocks.entry(key).or_insert_with(|| Value::Object(Default::default()));
+                    if let Some(block) = block.as_object_mut() {
+                        block.insert("enabled".into(), Value::from(enabled));
+                    }
+                }
+            }
+        }
+        value["version"] = Value::from(3);
     }
 }
 
@@ -553,7 +697,22 @@ mod tests {
         assert_eq!(settings.overlay.x, Some(-1_800));
         assert!(settings.overlay.locked);
         assert!(settings.overlay.always_on_top, "новое поле берёт умолчание");
-        assert_eq!(settings.sections, SectionSettings::default());
+        assert_eq!(settings.blocks, Blocks::default());
+    }
+
+    /// Файл v2: флажки секций становятся флажками блоков, остальное у блоков — умолчания.
+    #[test]
+    fn v2_sections_become_blocks() {
+        let v2 = r#"{ "version": 2, "setup_done": true,
+                      "sections": { "gpu": true, "cpu": false, "ram": false, "fps": true } }"#;
+        let (settings, _) = parse(v2).unwrap();
+        assert_eq!(settings.version, CURRENT_VERSION);
+        assert!(settings.blocks.gpu.enabled && settings.blocks.fps.enabled);
+        assert!(!settings.blocks.cpu.enabled && !settings.blocks.ram.enabled);
+        assert_eq!(settings.blocks.cpu.thresholds, crate::blocks::Thresholds::default());
+        assert!(settings.setup_done);
+        let written = serde_json::to_value(&settings).unwrap();
+        assert!(written.get("sections").is_none(), "старое поле не записывается");
     }
 
     #[test]
@@ -567,13 +726,13 @@ mod tests {
     #[test]
     fn absurd_values_are_repaired_not_fatal() {
         let (settings, _) = parse(
-            r#"{ "overlay": { "opacity": 7.0, "scale": 1.1 },
+            r#"{ "overlay": { "opacity": 7.0, "scale": 1.12 },
                  "fps": { "manual_process": "   ", "manual_pid": 0, "presentmon_path": "" },
                  "hotkeys": { "toggle_lock": " " } }"#,
         )
         .unwrap();
         assert_eq!(settings.overlay.opacity, 1.0);
-        assert_eq!(settings.overlay.scale, 1.0);
+        assert_eq!(settings.overlay.scale, 1.1, "масштаб — на сетку шага");
         assert_eq!(settings.fps.manual_process, None);
         assert_eq!(settings.fps.manual_pid, None);
         assert_eq!(settings.fps.presentmon_path, None);
@@ -581,7 +740,60 @@ mod tests {
 
         let (settings, _) = parse(r#"{ "overlay": { "opacity": 0.0, "scale": 9.0 } }"#).unwrap();
         assert_eq!(settings.overlay.opacity, MIN_OPACITY, "невидимый HUD — не настройка");
-        assert_eq!(settings.overlay.scale, 1.5);
+        assert_eq!(settings.overlay.scale, MAX_SCALE);
+
+        let (settings, _) = parse(r#"{ "overlay": { "scale": 0.1 } }"#).unwrap();
+        assert_eq!(settings.overlay.scale, MIN_SCALE);
+        let (settings, _) = parse(r#"{ "overlay": { "scale": 0.75 } }"#).unwrap();
+        assert_eq!(settings.overlay.scale, 0.75, "старые значения из кнопок остаются как были");
+    }
+
+    #[test]
+    fn overlay_mode_and_strip_height_are_repaired() {
+        let (settings, _) = parse(
+            r#"{ "overlay": { "mode": "vertical", "strip_height": 500, "show_clock": true } }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.overlay.mode, OverlayMode::Full);
+        assert_eq!(settings.overlay.strip_height, MAX_STRIP_HEIGHT);
+        assert!(settings.overlay.show_clock);
+        let (settings, _) = parse(r#"{ "overlay": { "mode": "strip" } }"#).unwrap();
+        assert_eq!(settings.overlay.mode, OverlayMode::Strip);
+    }
+
+    /// Поля «Общих» из чужого или испорченного файла чинятся по одному.
+    #[test]
+    fn general_settings_are_repaired_one_by_one() {
+        let (settings, _) = parse(
+            r#"{ "overlay": { "width_scale": 3.0, "anchor": { "enabled": true, "corner": "middle",
+                               "offset_x": -4 } },
+                 "units": { "temperature": "fahrenheit", "frequency": "kelvin" },
+                 "sensors": { "hardware_interval_ms": 900 } }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.overlay.width_scale, MAX_WIDTH_SCALE);
+        let anchor = settings.overlay.anchor;
+        assert!(anchor.enabled);
+        assert_eq!(anchor.corner, crate::placement::Corner::TopLeft);
+        assert_eq!(anchor.offset_x, 0);
+        assert_eq!(settings.units.temperature, crate::units::Temperature::Fahrenheit);
+        assert_eq!(settings.units.frequency, crate::units::Frequency::Auto);
+        assert_eq!(settings.sensors.hardware_interval_ms, 1_000);
+    }
+
+    /// Выбранный пользователем файл не переименовывается, даже если он не подошёл.
+    #[test]
+    fn import_leaves_a_foreign_file_alone() {
+        let path = temp_file("import");
+        std::fs::write(&path, "не настройки").unwrap();
+        assert!(Settings::import(&path).is_err());
+        assert!(path.exists(), "чужой файл остаётся на месте");
+
+        let mut settings = Settings::default();
+        settings.overlay.opacity = 0.5;
+        settings.save(&path).unwrap();
+        assert_eq!(Settings::import(&path).unwrap().settings, settings);
+        cleanup(&path);
     }
 
     /// Отрицательный PID — не число для u32: такой файл уходит в карантин, а не роняет запуск.
@@ -605,6 +817,19 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_rows_stay_off_until_enabled() {
+        let mut metrics = MetricSettings::default();
+        assert!(metrics.is_enabled(Metric::FpsLatency));
+        assert!(!metrics.is_enabled(Metric::CpuCoreLoad));
+        metrics.set_enabled(Metric::CpuCoreLoad, true);
+        assert!(metrics.is_enabled(Metric::CpuCoreLoad));
+        assert!(metrics.enabled.contains("cpu_core_load"));
+        assert!(metrics.disabled.is_empty(), "включение не трогает список выключенных");
+        metrics.set_enabled(Metric::CpuCoreLoad, false);
+        assert!(metrics.enabled.is_empty());
+    }
+
+    #[test]
     fn metric_keys_are_unique() {
         let keys: BTreeSet<&str> = Metric::ALL.iter().map(|m| m.key()).collect();
         assert_eq!(keys.len(), Metric::ALL.len());
@@ -616,7 +841,8 @@ mod tests {
         let mut settings = Settings::default();
         settings.overlay.x = Some(-1_900);
         settings.overlay.locked = true;
-        settings.sections.ram = false;
+        settings.blocks.ram.enabled = false;
+        settings.blocks.gpu.title = "Видяха".into();
         settings.metrics.set_enabled(Metric::CpuPower, false);
         settings.fps.target = TargetChoice::Manual;
         settings.fps.manual_process = Some("dmc4.exe".into());

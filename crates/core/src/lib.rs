@@ -16,14 +16,18 @@
 //! * [`target`] — политика выбора измеряемого процесса;
 //! * [`session_name`] — имена ETW-сессий и правило их уборки;
 //! * [`telemetry`] — модель показаний железа и итоговый [`telemetry::Snapshot`];
-//! * [`aggregator`] — слияние тиров опроса с TTL.
+//! * [`aggregator`] — слияние тиров опроса с TTL;
+//! * [`latency`] — задержка вывода кадра;
+//! * [`sensors`] — какую видеокарту и как часто опрашивать.
 
 #![forbid(unsafe_code)]
 
 pub mod aggregator;
 pub mod fps_state;
 pub mod graph;
+pub mod latency;
 pub mod ring;
+pub mod sensors;
 pub mod session_name;
 pub mod statistics;
 pub mod target;
@@ -39,6 +43,7 @@ pub use aggregator::{Aggregator, HardwareSample, SampleTier};
 pub use fps_state::{FpsAvailability, FpsReason, FpsState, TargetProcess};
 pub use graph::{FrametimeGraph, GraphBuilder};
 pub use ring::FrametimeRing;
+pub use sensors::SensorOptions;
 pub use session_name::{SESSION_PREFIX, session_name, should_sweep};
 pub use statistics::FrameStatistics;
 pub use target::{
@@ -46,5 +51,6 @@ pub use target::{
     is_shell_process,
 };
 pub use telemetry::{
-    CpuStats, GpuStats, MemoryStats, SectionHealth, SensorReason, SensorStatus, Snapshot,
+    CoreStats, CpuStats, GpuStats, HybridClocks, MemoryStats, SectionHealth, SensorReason,
+    SensorStatus, Snapshot,
 };

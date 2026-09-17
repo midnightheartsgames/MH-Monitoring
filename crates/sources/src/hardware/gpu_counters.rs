@@ -49,6 +49,18 @@ pub fn process_3d_load(instances: &[(String, f64)], pid: u32) -> f64 {
 }
 
 /// Занятая выделенная видеопамять адаптера, в байтах.
+/// Совпадает ли имя видеокарты с выбранным пользователем.
+///
+/// NVML и ядро графики называют одну карту почти одинаково, но не всегда буква в букву
+/// («NVIDIA GeForce RTX 5070 Ti» и «GeForce RTX 5070 Ti»), поэтому достаточно, чтобы одно имя
+/// содержало другое, без учёта регистра и лишних пробелов.
+pub fn same_gpu_name(a: &str, b: &str) -> bool {
+    let normalize =
+        |name: &str| name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let (a, b) = (normalize(a), normalize(b));
+    !a.is_empty() && !b.is_empty() && (a.contains(&b) || b.contains(&a))
+}
+
 pub fn adapter_memory(instances: &[(String, f64)], tag: &str) -> Option<u64> {
     let tag = tag.to_ascii_lowercase();
     instances
@@ -67,6 +79,13 @@ fn number_after(name: &str, marker: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_names_match_loosely() {
+        assert!(same_gpu_name("NVIDIA GeForce RTX 5070 Ti", "geforce  rtx 5070 ti"));
+        assert!(!same_gpu_name("NVIDIA GeForce RTX 5070 Ti", "AMD Radeon RX 7800 XT"));
+        assert!(!same_gpu_name("", "AMD Radeon"));
+    }
 
     const TAG: &str = "luid_0x00000000_0x0000d1f2";
 

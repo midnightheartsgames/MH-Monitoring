@@ -99,6 +99,7 @@ impl FrameSource for PresentMonSource {
             statistics: report.statistics,
             last_frame_at_ms: report.last_frame_at_ms,
             presentation: report.presentation,
+            latency_ms: report.latency_ms,
             diagnostics: format!(
                 "строк {}, кадров {}, негодных {}, чужих {}",
                 counters.rows, counters.parsed, counters.rejected, counters.filtered

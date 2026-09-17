@@ -23,8 +23,8 @@ fn main() {
             if info.software { ", программный" } else { "" }
         );
     }
-    let nvml = NvmlSensor::open().ok();
-    let mut wddm = match WddmGpuSensor::open() {
+    let nvml = NvmlSensor::open(None).ok();
+    let mut wddm = match WddmGpuSensor::open(None) {
         Ok(sensor) => sensor,
         Err(reason) => {
             println!("WDDM: {}", reason.message());

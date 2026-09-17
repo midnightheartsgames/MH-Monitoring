@@ -8,6 +8,7 @@ pub mod cpuid;
 pub mod gpu_counters;
 pub mod intel;
 pub mod nvml;
+pub mod smbios;
 pub mod system;
 
 #[cfg(windows)]
